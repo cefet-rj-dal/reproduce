@@ -1,0 +1,2 @@
+"input_size","preprocess","augment","nhid","actfun","key","window_size"
+6,"ts_norm_an","ts_aug_flip",4,"sig",4,6

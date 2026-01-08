@@ -1,0 +1,2 @@
+"input_size","preprocess","augment","size","decay","maxit","key","window_size"
+7,"ts_norm_diff","ts_aug_stretch",10,0.5,1000,50,8

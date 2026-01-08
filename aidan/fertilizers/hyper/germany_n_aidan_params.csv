@@ -1,0 +1,2 @@
+"input_size","preprocess","augment","nodesize","ntree","key","window_size"
+10,"ts_norm_swminmax","ts_aug_flip",6,50,46,10
