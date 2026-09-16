@@ -1,0 +1,32 @@
+original,english,description
+siglaempresa,carrier,Airline code
+diautilpartida,working_day_dep,Departure working-day indicator; original coding retained
+aeroportopartida,airport_dep,Departure airport ICAO code
+diautilchegada,working_day_arr,Arrival working-day indicator; original coding retained
+aeroportochegada,airport_arr,Arrival airport ICAO code
+diasemana,day_of_week_dep,Departure weekday code; numbering convention not recovered
+mes,month_dep,Departure month
+diasemana_chegada,day_of_week_arr,Arrival weekday code; numbering convention not recovered
+mes_chegada,month_arr,Arrival month
+ano_chegada,year_arr,Arrival year
+ano_partida,year_dep,Departure year
+binpprevistamin,time_bin_dep,Scheduled departure time bin; original boundaries unavailable
+bincprevistamin,time_bin_arr,Scheduled arrival time bin; original boundaries unavailable
+bintempbulboseco,dry_temperature_bin_dep,Departure dry-bulb temperature bin; original boundaries unavailable
+bintempbulboumido,wet_temperature_bin_dep,Departure wet-bulb temperature bin; original boundaries unavailable
+binumidaderelativa,humidity_bin_dep,Departure relative humidity bin; original boundaries unavailable
+binpressaoatmestacao,station_pressure_bin_dep,Departure station pressure bin; original boundaries unavailable
+binvelocidadevento,wind_speed_bin_dep,Departure wind speed bin; original boundaries unavailable
+binnebulosidade,cloud_cover_bin_dep,Departure cloud cover bin; original boundaries unavailable
+bintempbulboseco_chegada,dry_temperature_bin_arr,Arrival dry-bulb temperature bin; original boundaries unavailable
+bintempbulboumido_chegada,wet_temperature_bin_arr,Arrival wet-bulb temperature bin; original boundaries unavailable
+binumidaderelativa_chegada,humidity_bin_arr,Arrival relative humidity bin; original boundaries unavailable
+binpressaoatmestacao_chegada,station_pressure_bin_arr,Arrival station pressure bin; original boundaries unavailable
+binvelocidadevento_chegada,wind_speed_bin_arr,Arrival wind speed bin; original boundaries unavailable
+binnebulosidade_chegada,cloud_cover_bin_arr,Arrival cloud cover bin; original boundaries unavailable
+direcaoventocod,wind_direction_dep,Departure wind direction code
+direcaovento_chegadacod,wind_direction_arr,Arrival wind direction code
+binatpercp,delay_level_bin_dep,Departure airport delay percentage bin; original boundaries unavailable
+binatpercc,delay_level_bin_arr,Arrival airport delay percentage bin; original boundaries unavailable
+atrasop,delay_dep,Archived departure delay indicator; 1 indicates delay
+atrasoc,delay_arr,Archived arrival delay indicator; 1 indicates delay
