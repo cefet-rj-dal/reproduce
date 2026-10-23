@@ -19,5 +19,7 @@ GitHub for Reproducible Experiments
 - [stmotifexplorer/](stmotifexplorer/) - STMotif Explorer tool overview and assets.
 - [tsfm/](tsfm/) - LLMs for low-frequency time series forecasting (Chronos, Lag-LLaMA) vs baselines.
 - [tspredit/](tspredit/) - TSPredIT: integrated tuning of preprocessing and forecasting; workflows and analysis.
+- [synthetic-health-series-generator/](synthetic-health-series-generator/) - Synthetic monthly epidemiological time-series generator for changepoint detection benchmarks based on Brazilian health surveillance scenarios.
+- [mfef/](mfef/) - Multilevel Fuzzy Ensemble Framework for structural change detection in epidemiological time series; simulation study and real-data evaluation against Joinpoint.
 
 Each folder contains its own `readme.md` with objectives, structure, and how to run its experiments. External documentation links (when applicable) are placed inside the corresponding folder README.
