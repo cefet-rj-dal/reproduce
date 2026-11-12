@@ -1,0 +1,3 @@
+cluster,series_count,global_silhouette,cluster_description
+cluster_0,168,0.6196,sign change rate: low | lag-1 linear autocorrelation: high | lag-2 linear autocorrelation: high | overall linear dependence: high | spectral complexity: low | dominant oscillation frequency: low
+cluster_1,92,0.6196,sign change rate: high | lag-1 linear autocorrelation: low | lag-2 linear autocorrelation: low | overall linear dependence: low | spectral complexity: high | dominant oscillation frequency: high
