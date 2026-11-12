@@ -1,25 +1,267 @@
 # =========================================================
 # 02-run-mfef-synthetic.R
-# Batch runner for the MFEF families and the Joinpoint baseline
-# over the synthetic series. Computes soft/hard detection metrics
-# and writes a per-series, per-method, per-configuration results file.
+# Batch runner for the MFEF families and Joinpoint baselines
+# over the complete synthetic benchmark.
 #
-# Input : data/synthetic/processed/synthetic_series.rds
-# Output: outputs/synthetic/detections/<batch>.csv
+# Computes hard- and soft-detection metrics for each series,
+# method, and configuration and writes two detection batches.
+#
+# Input:
+#   data/synthetic/processed/synthetic_series.rds
+#
+# Outputs:
+#   outputs/synthetic/detections/
+#   batch_mfef_joinpoint_hybrid_soft_hard_id_0_850_*.csv
+#   batch_mfef_joinpoint_hybrid_soft_hard_id_851_1679_*.csv
+#
+# Reproducibility:
+#   R dependencies are managed through renv.
+#   Python dependencies are resolved through reticulate.
 # =========================================================
 
+# =========================================================
+# EXECUTION ENVIRONMENT
+# =========================================================
+
+execution_system <- Sys.info()[["sysname"]]
+
+if (identical(execution_system, "Darwin")) {
+  Sys.setenv(
+    KMP_DUPLICATE_LIB_OK = "TRUE"
+  )
+  
+  warning(
+    paste0(
+      "macOS OpenMP compatibility mode enabled. ",
+      "The analysis should also be reproduced on Linux ",
+      "without this workaround."
+    ),
+    call. = FALSE
+  )
+}
+
+Sys.setenv(
+  OMP_NUM_THREADS = "1",
+  MKL_NUM_THREADS = "1",
+  OPENBLAS_NUM_THREADS = "1",
+  VECLIB_MAXIMUM_THREADS = "1",
+  NUMEXPR_NUM_THREADS = "1"
+)
+
+# =========================================================
+# PYTHON REQUIREMENTS
+# =========================================================
+
+if (
+  !requireNamespace(
+    "reticulate",
+    quietly = TRUE
+  )
+) {
+  stop(
+    paste0(
+      "Missing R package: reticulate. ",
+      "Run renv::restore() before executing this analysis."
+    ),
+    call. = FALSE
+  )
+}
+
+library(
+  reticulate
+)
+
+reticulate::py_require(
+  packages = c(
+    "numpy==2.5.4",
+    "pandas==3.1.1",
+    "scikit-learn==1.9.1",
+    "torch==2.15.0"
+  ),
+  python_version = "==3.12.*",
+  action = "add"
+)
+
+python_configuration <- reticulate::py_config()
+
+required_python_modules <- c(
+  "numpy",
+  "pandas",
+  "sklearn",
+  "torch"
+)
+
+python_module_status <- setNames(
+  vapply(
+    required_python_modules,
+    reticulate::py_module_available,
+    logical(1)
+  ),
+  required_python_modules
+)
+
+if (any(!python_module_status)) {
+  stop(
+    paste0(
+      "Missing Python module(s): ",
+      paste(
+        names(
+          python_module_status
+        )[!python_module_status],
+        collapse = ", "
+      ),
+      ". Restart R and run this script from the first line."
+    ),
+    call. = FALSE
+  )
+}
+
+# PyTorch must be imported before R packages that load OpenMP.
+reticulate::py_run_string(
+  "
+import platform
+import numpy as np
+import pandas as pd
+import sklearn
+import torch
+
+torch.set_num_threads(1)
+
+print('Python architecture:', platform.machine())
+print('NumPy version:', np.__version__)
+print('pandas version:', pd.__version__)
+print('scikit-learn version:', sklearn.__version__)
+print('PyTorch version:', torch.__version__)
+print('PyTorch threads:', torch.get_num_threads())
+print('MPS available:', torch.backends.mps.is_available())
+"
+)
+
+# =========================================================
+# REPRODUCIBILITY
+# =========================================================
+
+analysis_seed <- 42L
+
+set_analysis_seed <- function(
+    seed = 42L) {
+  
+  seed <- as.integer(
+    seed
+  )
+  
+  set.seed(
+    seed
+  )
+  
+  reticulate::py_run_string(
+    "
+import os
+import random
+import numpy as np
+import torch
+
+def set_analysis_seed(seed=42):
+    seed = int(seed)
+
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    if hasattr(torch.backends, 'cudnn'):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    return seed
+"
+  )
+  
+  reticulate::py$set_analysis_seed(
+    seed
+  )
+  
+  invisible(
+    seed
+  )
+}
+
+set_analysis_seed(
+  analysis_seed
+)
+
+# =========================================================
+# REQUIRED R PACKAGES
+# =========================================================
+
+required_r_packages <- c(
+  "harbinger",
+  "daltoolbox",
+  "daltoolboxdp",
+  "ocp",
+  "tidyverse",
+  "here",
+  "rJavaEnv"
+)
+
+missing_r_packages <- required_r_packages[
+  !vapply(
+    required_r_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(missing_r_packages) > 0L) {
+  stop(
+    paste0(
+      "Missing R package(s): ",
+      paste(
+        missing_r_packages,
+        collapse = ", "
+      ),
+      ". Run renv::restore() before executing this analysis."
+    ),
+    call. = FALSE
+  )
+}
+
+if (
+  as.character(
+    utils::packageVersion(
+      "ocp"
+    )
+  ) != "0.1.1"
+) {
+  stop(
+    paste0(
+      "Package 'ocp' 0.1.1 is required, but version ",
+      as.character(
+        utils::packageVersion(
+          "ocp"
+        )
+      ),
+      " is installed."
+    ),
+    call. = FALSE
+  )
+}
+
+# =========================================================
+# R PACKAGES
+# =========================================================
+
+library(harbinger)
+library(daltoolbox)
+library(daltoolboxdp)
 library(tidyverse)
 library(here)
 library(rJavaEnv)
-library(daltoolbox)
-library(daltoolboxdp)
-library(harbinger)
-
-# =========================================================
-# Seed
-# =========================================================
-source(url("https://raw.githubusercontent.com/cefet-rj-dal/harbinger/master/examples/seed.R"))
-set_example_seed(42)
 
 # =========================================================
 # Dependency checks
@@ -73,9 +315,12 @@ show_diagnostic_metrics <- FALSE
 open_diagnostic_metrics_view <- FALSE
 open_viewer_after_run <- FALSE
 
-# Batch range (by serie_id)
-batch_start_serie_id <- 838
-batch_end_serie_id <- 838
+# Detection batches
+batch_ranges <- tibble::tribble(
+  ~batch_start_serie_id, ~batch_end_serie_id,
+  0L,                    850L,
+  851L,                  1679L
+)
 
 # Visual diagnostics target
 plot_target_serie_id <- 838
@@ -127,27 +372,56 @@ joinpoint_min_end <- 6
 joinpoint_k_max <- 7
 
 # =========================================================
-# Output file
+# OUTPUT DIRECTORY AND FILE NAMES
 # =========================================================
+
 threshold_grid_label <- paste0(
   "thrgrid_",
-  paste(gsub("\\.", "p", format(detection_threshold_grid, trim = TRUE)), collapse = "_")
-)
-
-results_folder <- here::here("outputs", "synthetic", "detections")
-
-dir.create(results_folder, recursive = TRUE, showWarnings = FALSE)
-
-results_csv_file <- file.path(
-  results_folder,
-  paste0(
-    "batch_mfef_joinpoint_hybrid_soft_hard_",
-    "id_", batch_start_serie_id, "_", batch_end_serie_id,
-    "_sw_", softed_window_size,
-    "_", threshold_grid_label,
-    ".csv"
+  paste(
+    gsub(
+      "\\.",
+      "p",
+      format(
+        detection_threshold_grid,
+        trim = TRUE
+      )
+    ),
+    collapse = "_"
   )
 )
+
+synthetic_detection_directory <- here::here(
+  "outputs",
+  "synthetic",
+  "detections"
+)
+
+dir.create(
+  synthetic_detection_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+build_batch_file <- function(
+    batch_start_serie_id,
+    batch_end_serie_id) {
+  
+  file.path(
+    synthetic_detection_directory,
+    paste0(
+      "batch_mfef_joinpoint_hybrid_soft_hard_",
+      "id_",
+      batch_start_serie_id,
+      "_",
+      batch_end_serie_id,
+      "_sw_",
+      softed_window_size,
+      "_",
+      threshold_grid_label,
+      ".csv"
+    )
+  )
+}
 
 # =========================================================
 # Helpers
@@ -1387,143 +1661,585 @@ if (n_available == 0) {
 }
 
 # =========================================================
-# Run batch
+# RUN DETECTION BATCHES
 # =========================================================
+
 if (run_batch) {
   
-  batch_global_begin <- Sys.time()
-  
-  cat("\nBatch selected by serie_id:\n")
-  cat("batch_start_serie_id:", batch_start_serie_id, "\n")
-  cat("batch_end_serie_id:", batch_end_serie_id, "\n")
-  cat("Batch CSV:", results_csv_file, "\n")
-  
-  if (batch_start_serie_id > batch_end_serie_id) {
-    stop("batch_start_serie_id cannot be greater than batch_end_serie_id.")
+  if (
+    nrow(
+      batch_ranges
+    ) == 0L
+  ) {
+    stop(
+      "No detection batches were configured.",
+      call. = FALSE
+    )
   }
   
-  batch_tbl <- synthetic_pool %>%
-    filter(
-      serie_id >= batch_start_serie_id,
-      serie_id <= batch_end_serie_id
+  if (
+    anyNA(
+      batch_ranges
+    ) ||
+    any(
+      batch_ranges$
+      batch_start_serie_id >
+      batch_ranges$
+      batch_end_serie_id
     )
-  
-  if (nrow(batch_tbl) == 0) {
-    stop("No series found in the given serie_id range.")
+  ) {
+    stop(
+      "Invalid synthetic detection batch ranges.",
+      call. = FALSE
+    )
   }
   
-  cat("\nSeries selected in the batch:", nrow(batch_tbl), "\n")
-  cat("First serie_id:", batch_tbl$serie_id[[1]], "\n")
-  cat("Last serie_id:", batch_tbl$serie_id[[nrow(batch_tbl)]], "\n")
-  
-  all_results <- vector("list", nrow(batch_tbl))
-  
-  for (i in seq_len(nrow(batch_tbl))) {
-    
-    selected_row <- batch_tbl[i, , drop = FALSE]
-    series_begin <- Sys.time()
-    
-    cat("\n=========================================================\n")
-    cat(
-      "Processing serie_id =",
-      selected_row$serie_id,
-      "|",
-      i,
-      "of",
-      nrow(batch_tbl),
-      "\n"
-    )
-    cat("Start:", format(series_begin, "%Y-%m-%d %H:%M:%S"), "\n")
-    cat("=========================================================\n")
-    
-    all_results[[i]] <- tryCatch({
-      
-      run_one_series_comparison(
-        selected_row = selected_row,
-        detection_time_tolerance_grid = detection_time_tolerance_grid,
-        detection_threshold_grid = detection_threshold_grid,
-        softed_window_size = softed_window_size,
-        detection_threshold_type = detection_threshold_type,
-        detection_use_nms = detection_use_nms,
-        run_joinpoint_baseline = run_joinpoint_baseline,
-        run_mfef_base = run_mfef_base,
-        run_mfef_jp_false = run_mfef_jp_false,
-        run_mfef_jp_true = run_mfef_jp_true,
-        bocpd_hazard = bocpd_hazard,
-        bocpd_dist = bocpd_dist,
-        bocpd_threshold = bocpd_threshold,
-        bocpd_min_distance = bocpd_min_distance,
-        bocpd_burn_in = bocpd_burn_in,
-        binseg_Q = binseg_Q,
-        joinpoint_min_between = joinpoint_min_between,
-        joinpoint_min_end = joinpoint_min_end,
-        joinpoint_k_max = joinpoint_k_max
-      )
-      
-    }, error = function(e) {
-      
-      metadata <- extract_series_metadata(selected_row)
-      df_tmp <- selected_row[["data"]][[1]]
-      
-      make_empty_result_row(
-        metadata = metadata,
-        method = NA_character_,
-        model_detail = NA_character_,
-        time_tolerance = NA_real_,
-        threshold = NA_real_,
-        log_transform = NA,
-        true_cps = paste(df_tmp$tempo[df_tmp$is_true_cp == 1], collapse = "; "),
-        n_true = sum(df_tmp$is_true_cp == 1),
-        status = "series_error",
-        error_message = conditionMessage(e)
-      )
-    })
-    
-    series_end <- Sys.time()
-    
-    cat("End:", format(series_end, "%Y-%m-%d %H:%M:%S"), "\n")
-    cat(
-      "Elapsed serie_id", selected_row$serie_id, ":",
-      format_elapsed(difftime(series_end, series_begin, units = "secs")),
-      "\n"
-    )
-    
-    if (i %% 10 == 0) {
-      invisible(gc(verbose = FALSE))
-    }
-  }
-  
-  all_results <- bind_rows(all_results) %>%
+  batch_overlap_check <- batch_ranges %>%
     arrange(
-      serie_id,
-      method,
-      threshold,
-      model_detail,
-      time_tolerance
+      batch_start_serie_id,
+      batch_end_serie_id
+    ) %>%
+    mutate(
+      previous_end = dplyr::lag(
+        batch_end_serie_id
+      )
     )
   
-  save_batch_begin <- Sys.time()
-  write_csv(all_results, results_csv_file)
-  save_batch_end <- Sys.time()
+  if (
+    any(
+      batch_overlap_check$
+      batch_start_serie_id <=
+      batch_overlap_check$
+      previous_end,
+      na.rm = TRUE
+    )
+  ) {
+    stop(
+      "The synthetic detection batch ranges overlap.",
+      call. = FALSE
+    )
+  }
   
-  batch_global_end <- Sys.time()
-  
-  cat("\nBatch file saved:\n")
-  cat("Batch CSV:", results_csv_file, "\n")
-  cat(
-    "Time saving batch CSV:",
-    format_elapsed(difftime(save_batch_end, save_batch_begin, units = "secs")),
-    "\n"
+  batch_output_files <- character(
+    nrow(
+      batch_ranges
+    )
   )
   
-  cat(
-    "\nTotal batch time:",
-    format_elapsed(difftime(batch_global_end, batch_global_begin, units = "secs")),
-    "\n"
+  batch_result_objects <- vector(
+    mode = "list",
+    length = nrow(
+      batch_ranges
+    )
   )
   
-  if (open_viewer_after_run) {
-    safe_view(all_results, title = "all_results")
+  for (
+    batch_index in
+    seq_len(
+      nrow(
+        batch_ranges
+      )
+    )
+  ) {
+    
+    batch_start_serie_id <-
+      batch_ranges$
+      batch_start_serie_id[[
+        batch_index
+      ]]
+    
+    batch_end_serie_id <-
+      batch_ranges$
+      batch_end_serie_id[[
+        batch_index
+      ]]
+    
+    results_csv_file <- build_batch_file(
+      batch_start_serie_id =
+        batch_start_serie_id,
+      batch_end_serie_id =
+        batch_end_serie_id
+    )
+    
+    batch_output_files[[
+      batch_index
+    ]] <- results_csv_file
+    
+    batch_global_begin <- Sys.time()
+    
+    # Each batch reproduces the same initial random state used
+    # when the batches are executed in separate R sessions.
+    set_analysis_seed(
+      analysis_seed
+    )
+    
+    cat("\n")
+    cat("=========================================================\n")
+    cat(
+      "BATCH",
+      batch_index,
+      "OF",
+      nrow(
+        batch_ranges
+      ),
+      "\n"
+    )
+    cat("=========================================================\n")
+    cat(
+      "First serie_id:",
+      batch_start_serie_id,
+      "\n"
+    )
+    cat(
+      "Last serie_id:",
+      batch_end_serie_id,
+      "\n"
+    )
+    cat(
+      "Output file:",
+      results_csv_file,
+      "\n"
+    )
+    
+    batch_tbl <- synthetic_pool %>%
+      filter(
+        serie_id >=
+          batch_start_serie_id,
+        serie_id <=
+          batch_end_serie_id
+      )
+    
+    expected_batch_size <-
+      batch_end_serie_id -
+      batch_start_serie_id +
+      1L
+    
+    if (
+      nrow(
+        batch_tbl
+      ) !=
+      expected_batch_size
+    ) {
+      stop(
+        paste0(
+          "Batch ",
+          batch_start_serie_id,
+          "--",
+          batch_end_serie_id,
+          " contains ",
+          nrow(
+            batch_tbl
+          ),
+          " series; expected ",
+          expected_batch_size,
+          "."
+        ),
+        call. = FALSE
+      )
+    }
+    
+    cat(
+      "Series selected:",
+      nrow(
+        batch_tbl
+      ),
+      "\n"
+    )
+    cat(
+      "Configurations per series:",
+      n_configurations_per_series,
+      "\n"
+    )
+    
+    batch_results <- vector(
+      mode = "list",
+      length = nrow(
+        batch_tbl
+      )
+    )
+    
+    for (
+      series_index in
+      seq_len(
+        nrow(
+          batch_tbl
+        )
+      )
+    ) {
+      
+      selected_row <- batch_tbl[
+        series_index,
+        ,
+        drop = FALSE
+      ]
+      
+      series_begin <- Sys.time()
+      
+      cat("\n")
+      cat("=========================================================\n")
+      cat(
+        "Processing serie_id =",
+        selected_row$serie_id,
+        "|",
+        series_index,
+        "of",
+        nrow(
+          batch_tbl
+        ),
+        "\n"
+      )
+      cat(
+        "Start:",
+        format(
+          series_begin,
+          "%Y-%m-%d %H:%M:%S"
+        ),
+        "\n"
+      )
+      cat("=========================================================\n")
+      
+      batch_results[[
+        series_index
+      ]] <- tryCatch(
+        {
+          run_one_series_comparison(
+            selected_row =
+              selected_row,
+            detection_time_tolerance_grid =
+              detection_time_tolerance_grid,
+            detection_threshold_grid =
+              detection_threshold_grid,
+            softed_window_size =
+              softed_window_size,
+            detection_threshold_type =
+              detection_threshold_type,
+            detection_use_nms =
+              detection_use_nms,
+            run_joinpoint_baseline =
+              run_joinpoint_baseline,
+            run_mfef_base =
+              run_mfef_base,
+            run_mfef_jp_false =
+              run_mfef_jp_false,
+            run_mfef_jp_true =
+              run_mfef_jp_true,
+            bocpd_hazard =
+              bocpd_hazard,
+            bocpd_dist =
+              bocpd_dist,
+            bocpd_threshold =
+              bocpd_threshold,
+            bocpd_min_distance =
+              bocpd_min_distance,
+            bocpd_burn_in =
+              bocpd_burn_in,
+            binseg_Q =
+              binseg_Q,
+            joinpoint_min_between =
+              joinpoint_min_between,
+            joinpoint_min_end =
+              joinpoint_min_end,
+            joinpoint_k_max =
+              joinpoint_k_max
+          )
+        },
+        error = function(e) {
+          
+          metadata <- extract_series_metadata(
+            selected_row
+          )
+          
+          df_tmp <- selected_row[[
+            "data"
+          ]][[
+            1
+          ]]
+          
+          make_empty_result_row(
+            metadata =
+              metadata,
+            method =
+              NA_character_,
+            model_detail =
+              NA_character_,
+            time_tolerance =
+              NA_real_,
+            threshold =
+              NA_real_,
+            log_transform =
+              NA,
+            true_cps = paste(
+              df_tmp$tempo[
+                df_tmp$is_true_cp ==
+                  1
+              ],
+              collapse = "; "
+            ),
+            n_true = sum(
+              df_tmp$is_true_cp ==
+                1
+            ),
+            status =
+              "series_error",
+            error_message =
+              conditionMessage(
+                e
+              )
+          )
+        }
+      )
+      
+      series_end <- Sys.time()
+      
+      cat(
+        "End:",
+        format(
+          series_end,
+          "%Y-%m-%d %H:%M:%S"
+        ),
+        "\n"
+      )
+      
+      cat(
+        "Elapsed serie_id",
+        selected_row$serie_id,
+        ":",
+        format_elapsed(
+          difftime(
+            series_end,
+            series_begin,
+            units = "secs"
+          )
+        ),
+        "\n"
+      )
+      
+      if (
+        series_index %%
+        10L ==
+        0L
+      ) {
+        invisible(
+          gc(
+            verbose = FALSE
+          )
+        )
+      }
+    }
+    
+    batch_results <- bind_rows(
+      batch_results
+    ) %>%
+      arrange(
+        serie_id,
+        method,
+        threshold,
+        model_detail,
+        time_tolerance
+      )
+    
+    n_joinpoint_configurations <- if (
+      run_joinpoint_baseline
+    ) {
+      2L
+    } else {
+      0L
+    }
+    
+    n_ensemble_families <- length(
+      get_active_ensemble_families(
+        run_mfef_base =
+          run_mfef_base,
+        run_mfef_jp_false =
+          run_mfef_jp_false,
+        run_mfef_jp_true =
+          run_mfef_jp_true
+      )
+    )
+    
+    n_ensemble_configurations <-
+      n_ensemble_families *
+      length(
+        detection_time_tolerance_grid
+      ) *
+      length(
+        detection_threshold_grid
+      )
+    
+    n_configurations_per_series <-
+      n_joinpoint_configurations +
+      n_ensemble_configurations
+    
+    expected_configuration_rows <-
+      nrow(
+        batch_tbl
+      ) *
+      n_configurations_per_series
+    
+    if (
+      nrow(
+        batch_results
+      ) !=
+      expected_configuration_rows
+    ) {
+      stop(
+        paste0(
+          "Batch ",
+          batch_start_serie_id,
+          "--",
+          batch_end_serie_id,
+          " returned ",
+          nrow(
+            batch_results
+          ),
+          " rows; expected ",
+          expected_configuration_rows,
+          "."
+        ),
+        call. = FALSE
+      )
+    }
+    
+    save_batch_begin <- Sys.time()
+    
+    readr::write_csv(
+      batch_results,
+      results_csv_file
+    )
+    
+    save_batch_end <- Sys.time()
+    batch_global_end <- Sys.time()
+    
+    if (
+      !file.exists(
+        results_csv_file
+      ) ||
+      is.na(
+        file.info(
+          results_csv_file
+        )$size
+      ) ||
+      file.info(
+        results_csv_file
+      )$size <=
+      0
+    ) {
+      stop(
+        paste0(
+          "The batch output was not saved correctly: ",
+          results_csv_file,
+          "."
+        ),
+        call. = FALSE
+      )
+    }
+    
+    batch_result_objects[[
+      batch_index
+    ]] <- batch_results
+    
+    cat("\nBatch file saved:\n")
+    cat(
+      results_csv_file,
+      "|",
+      file.info(
+        results_csv_file
+      )$size,
+      "bytes\n"
+    )
+    
+    cat(
+      "Time saving batch CSV:",
+      format_elapsed(
+        difftime(
+          save_batch_end,
+          save_batch_begin,
+          units = "secs"
+        )
+      ),
+      "\n"
+    )
+    
+    cat(
+      "Total batch time:",
+      format_elapsed(
+        difftime(
+          batch_global_end,
+          batch_global_begin,
+          units = "secs"
+        )
+      ),
+      "\n"
+    )
+  }
+  
+  names(
+    batch_result_objects
+  ) <- paste0(
+    batch_ranges$
+      batch_start_serie_id,
+    "_",
+    batch_ranges$
+      batch_end_serie_id
+  )
+  
+  batch_output_metadata <- file.info(
+    batch_output_files
+  )
+  
+  if (
+    any(
+      !file.exists(
+        batch_output_files
+      )
+    ) ||
+    any(
+      is.na(
+        batch_output_metadata$size
+      ) |
+      batch_output_metadata$size <=
+      0
+    )
+  ) {
+    stop(
+      "One or more synthetic detection batches are missing or empty.",
+      call. = FALSE
+    )
+  }
+  
+  cat("\n")
+  cat("=========================================================\n")
+  cat("SYNTHETIC DETECTION BATCHES\n")
+  cat("=========================================================\n")
+  
+  for (
+    batch_output_file in
+    batch_output_files
+  ) {
+    cat(
+      batch_output_file,
+      "|",
+      file.info(
+        batch_output_file
+      )$size,
+      "bytes\n"
+    )
+  }
+  
+  cat(
+    "\nAll synthetic detection batches were saved successfully.\n"
+  )
+  
+  if (
+    open_viewer_after_run
+  ) {
+    safe_view(
+      bind_rows(
+        batch_result_objects
+      ),
+      title =
+        "synthetic_detection_results"
+    )
   }
 }
 

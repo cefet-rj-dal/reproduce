@@ -36,7 +36,7 @@ detection accuracy.
 
 Produced by the synthetic-series generator (Python), available at:
 
-- Generator repository: https://github.com/isadpr/synthetic-series-generation
+- Generator repository: https://github.com/cefet-rj-dal/reproduce/tree/main/synthetic-series-generation
 
 The generator and the full experimental design are documented in that
 repository. The files in this folder are a frozen copy corresponding to a fixed

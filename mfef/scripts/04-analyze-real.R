@@ -1,31 +1,258 @@
 # =========================================================
 # 04-analyze-real.R
-# Real-data application (DATASUS). Runs MFEF+JP on the fixed
-# short-list configuration (F, 12, 0.95), extracts the internal
-# Joinpoint detections, and computes segment metrics
-# (mean/variance/delta via block bootstrap; APC via GLS AR(1)),
-# AAPC, and the fuzzy-score heatmap.
+# Real-data application using Brazilian DATASUS indicators.
 #
-# Input : data/real/raw/txs_<tipo_dado>_<tipo_evento>.csv
-# Output: console tables and figures
+# The script applies MFEF+JP under the fixed shortlisted
+# configuration MFEF+JP(F,12,0.95), extracts the internal
+# Joinpoint detections, estimates segment-level statistics,
+# and produces the ensemble and fuzzy-score figures.
+#
+# Input:
+#   data/real/raw/txs_<tipo_dado>_<tipo_evento>.csv
+#
+# Outputs:
+#   RDS result artifacts in results/real/;
+#   PDF figures in figures/real/;
+#   console summaries.
+#
+# Reproducibility:
+#   R dependencies are managed through renv.
+#   Python dependencies are resolved through reticulate.
+# =========================================================
+
+# =========================================================
+# EXECUTION ENVIRONMENT
+# =========================================================
+
+execution_system <- Sys.info()[["sysname"]]
+
+if (identical(execution_system, "Darwin")) {
+  Sys.setenv(
+    KMP_DUPLICATE_LIB_OK = "TRUE"
+  )
+  
+  warning(
+    paste0(
+      "macOS OpenMP compatibility mode enabled. ",
+      "The analysis should also be reproduced on Linux ",
+      "without this workaround."
+    ),
+    call. = FALSE
+  )
+}
+
+Sys.setenv(
+  OMP_NUM_THREADS = "1",
+  MKL_NUM_THREADS = "1",
+  OPENBLAS_NUM_THREADS = "1",
+  VECLIB_MAXIMUM_THREADS = "1",
+  NUMEXPR_NUM_THREADS = "1"
+)
+
+# =========================================================
+# PYTHON REQUIREMENTS
+# =========================================================
+
+library(
+  reticulate
+)
+
+reticulate::py_require(
+  packages = c(
+    "numpy==2.5.4",
+    "pandas==3.1.1",
+    "scikit-learn==1.9.1",
+    "torch==2.15.0"
+  ),
+  python_version = "==3.12.*",
+  action = "add"
+)
+
+python_configuration <- reticulate::py_config()
+
+required_python_modules <- c(
+  "numpy",
+  "pandas",
+  "sklearn",
+  "torch"
+)
+
+python_module_status <- setNames(
+  vapply(
+    required_python_modules,
+    reticulate::py_module_available,
+    logical(1)
+  ),
+  required_python_modules
+)
+
+if (any(!python_module_status)) {
+  stop(
+    paste0(
+      "Missing Python module(s): ",
+      paste(
+        names(
+          python_module_status
+        )[!python_module_status],
+        collapse = ", "
+      ),
+      ". Restart R and run this script from the first line."
+    ),
+    call. = FALSE
+  )
+}
+
+# PyTorch must be imported before R packages that load OpenMP.
+reticulate::py_run_string(
+  "
+import platform
+import numpy as np
+import pandas as pd
+import sklearn
+import torch
+
+torch.set_num_threads(1)
+
+print('Python architecture:', platform.machine())
+print('NumPy version:', np.__version__)
+print('pandas version:', pd.__version__)
+print('scikit-learn version:', sklearn.__version__)
+print('PyTorch version:', torch.__version__)
+print('PyTorch threads:', torch.get_num_threads())
+print('MPS available:', torch.backends.mps.is_available())
+"
+)
+
+# =========================================================
+# REPRODUCIBILITY
+# =========================================================
+
+analysis_seed <- 42L
+bootstrap_replicates <- 1000L
+
+set_analysis_seed <- function(
+    seed = 42L) {
+  
+  seed <- as.integer(
+    seed
+  )
+  
+  set.seed(
+    seed
+  )
+  
+  reticulate::py_run_string(
+    "
+import os
+import random
+import numpy as np
+import torch
+
+def set_analysis_seed(seed=42):
+    seed = int(seed)
+
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    if hasattr(torch.backends, 'cudnn'):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    return seed
+"
+  )
+  
+  reticulate::py$set_analysis_seed(
+    seed
+  )
+  
+  invisible(
+    seed
+  )
+}
+
+set_analysis_seed(
+  analysis_seed
+)
+
+# =========================================================
+# REQUIRED R PACKAGES
+# =========================================================
+
+required_r_packages <- c(
+  "harbinger",
+  "daltoolbox",
+  "daltoolboxdp",
+  "ocp",
+  "tidyverse",
+  "patchwork",
+  "nlme",
+  "here"
+)
+
+missing_r_packages <- required_r_packages[
+  !vapply(
+    required_r_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(missing_r_packages) > 0L) {
+  stop(
+    paste0(
+      "Missing R package(s): ",
+      paste(
+        missing_r_packages,
+        collapse = ", "
+      ),
+      ". Run renv::restore() before executing this analysis."
+    ),
+    call. = FALSE
+  )
+}
+
+if (
+  as.character(
+    utils::packageVersion(
+      "ocp"
+    )
+  ) != "0.1.1"
+) {
+  stop(
+    paste0(
+      "Package 'ocp' 0.1.1 is required, but version ",
+      as.character(
+        utils::packageVersion(
+          "ocp"
+        )
+      ),
+      " is installed."
+    ),
+    call. = FALSE
+  )
+}
+
+# =========================================================
+# R PACKAGES
 # =========================================================
 
 library(harbinger)
 library(daltoolbox)
 library(daltoolboxdp)
-
-library(ggplot2)
-library(patchwork)
 library(tidyverse)
-library(lubridate)
+library(patchwork)
 library(nlme)
 library(here)
 
-# =========================================================
-# Seed (same as the simulation for consistency)
-# =========================================================
-source(url("https://raw.githubusercontent.com/cefet-rj-dal/harbinger/master/examples/seed.R"))
-set_example_seed(42)
+
 
 # =========================================================
 # Data loading and filtering
@@ -274,7 +501,7 @@ build_static_frozen_bank <- function(serie) {
       min_between = joinpoint_min_between,
       min_end = joinpoint_min_end,
       k_max = joinpoint_k_max,
-      log_transform = FALSE
+      log_transform = REAL_JP_LOG
     ),
     serie, cfg
   )
@@ -551,10 +778,15 @@ compute_segment_metrics <- function(serie, change_positions, timestamps,
         delta_mean_ci = sprintf("%.3f [%.3f, %.3f]", delta_mean, dm_ci[1], dm_ci[2]),
         delta_mean_sig = dm_sig,
         delta_apc = round(segments_tbl$apc[i + 1] - segments_tbl$apc[i], 2),
-        delta_var = round(delta_var, 5),
-        delta_var_lower = round(dv_ci[1], 5),
-        delta_var_upper = round(dv_ci[2], 5),
-        delta_var_ci = sprintf("%.5f [%.5f, %.5f]", delta_var, dv_ci[1], dv_ci[2]),
+        delta_var = delta_var,
+        delta_var_lower = unname(dv_ci[1]),
+        delta_var_upper = unname(dv_ci[2]),
+        delta_var_ci = sprintf(
+          "%.8f [%.8f, %.8f]",
+          delta_var,
+          dv_ci[1],
+          dv_ci[2]
+        ),
         delta_var_sig = dv_sig
       )
     }
@@ -574,327 +806,1683 @@ compute_segment_metrics <- function(serie, change_positions, timestamps,
 # on top. X axis at round years; Y axis with fixed steps.
 # =========================================================
 
-plot_series_fuzzy_heatmap <- function(serie, timestamps, fuzzy_score,
-                                      threshold_value = NULL,
-                                      palette = c("white", "yellow", "red"),
-                                      n_interp = 3000,
-                                      show_axis_titles = FALSE,
-                                      x_break_years = "auto",   # "auto", 5 or 10
-                                      auto_threshold_years = 20,
-                                      y_n_breaks = 1) {
-  stopifnot(length(serie) == length(fuzzy_score),
-            length(serie) == length(timestamps))
-  df_line <- tibble(
-    timestamp = timestamps,
-    value     = as.numeric(serie),
-    score     = as.numeric(fuzzy_score)
-  ) %>%
-    dplyr::filter(!is.na(value), !is.na(score))
-  if (nrow(df_line) == 0) stop("Empty data frame after removing NAs.")
-  limiar <- threshold_value
+# =========================================================
+# Dynamic axis helpers
+# =========================================================
+
+compute_year_breaks <- function(
+    timestamps,
+    target_breaks = 6L) {
   
-  # Fine time grid for the smooth horizontal heatmap
-  t_num  <- as.numeric(df_line$timestamp)
-  grid_t <- seq(min(t_num), max(t_num), length.out = n_interp)
-  grid_s <- approx(x = t_num, y = df_line$score, xout = grid_t, rule = 2)$y
-  tile_w <- (max(t_num) - min(t_num)) / n_interp
-  df_heat <- tibble(
-    timestamp = as.Date(grid_t, origin = "1970-01-01"),
-    score     = grid_s
+  timestamps <- as.Date(
+    timestamps
   )
   
-  # Vertical geometry: bands span the full height
-  x_range  <- as.Date(range(df_line$timestamp))
-  y_min    <- min(df_line$value)
-  y_max    <- max(df_line$value)
-  y_center <- (y_min + y_max) / 2
-  y_height <- (y_max - y_min) * 1.30
+  valid_timestamps <- timestamps[
+    !is.na(
+      timestamps
+    )
+  ]
   
-  # Automatic X-axis spacing
-  span_years <- as.numeric(difftime(x_range[2], x_range[1], units = "days")) / 365.25
-  if (identical(x_break_years, "auto")) {
-    x_break_years <- if (span_years > auto_threshold_years) 10 else 5
+  if (length(valid_timestamps) == 0L) {
+    stop(
+      "No valid timestamps were provided.",
+      call. = FALSE
+    )
   }
   
-  # X breaks anchored at round years (multiples of 5/10)
-  yr_min <- as.integer(format(x_range[1], "%Y"))
-  yr_max <- as.integer(format(x_range[2], "%Y"))
-  first_break <- ceiling(yr_min / x_break_years) * x_break_years
-  last_break  <- floor(yr_max  / x_break_years) * x_break_years
-  break_years <- seq(first_break, last_break, by = x_break_years)
-  x_breaks    <- as.Date(paste0(break_years, "-01-01"))
+  start_date <- min(
+    valid_timestamps
+  )
   
-  # Legend with threshold mark
-  if (!is.null(limiar)) {
-    br  <- c(0, limiar, 1)
-    lbl <- c("0", paste0("Threshold = ", round(limiar, 3)), "1")
+  end_date <- max(
+    valid_timestamps
+  )
+  
+  start_year <- as.integer(
+    format(
+      start_date,
+      "%Y"
+    )
+  )
+  
+  end_year <- as.integer(
+    format(
+      end_date,
+      "%Y"
+    )
+  )
+  
+  span_years <- max(
+    1L,
+    end_year - start_year
+  )
+  
+  candidate_steps <- c(
+    1L,
+    2L,
+    3L,
+    5L,
+    10L,
+    20L
+  )
+  
+  target_step <- span_years /
+    max(
+      1L,
+      as.integer(
+        target_breaks
+      ) -
+        1L
+    )
+  
+  step_years <- candidate_steps[
+    which.min(
+      abs(
+        candidate_steps -
+          target_step
+      )
+    )
+  ]
+  
+  first_year <- ceiling(
+    start_year /
+      step_years
+  ) *
+    step_years
+  
+  last_year <- floor(
+    end_year /
+      step_years
+  ) *
+    step_years
+  
+  if (first_year <= last_year) {
+    break_years <- seq(
+      from = first_year,
+      to = last_year,
+      by = step_years
+    )
   } else {
-    br  <- c(0, 0.5, 1)
-    lbl <- c("0", "0.5", "1")
+    break_years <- unique(
+      c(
+        start_year,
+        end_year
+      )
+    )
   }
-  x_lab <- if (show_axis_titles) "Year" else NULL
-  y_lab <- if (show_axis_titles) "Rate" else NULL
   
-  ggplot() +
-    geom_tile(data = df_heat,
-              aes(x = timestamp, y = y_center, fill = score),
-              height = y_height, width = tile_w) +
-    geom_line(data = df_line, aes(x = timestamp, y = value),
-              color = "#222222", linewidth = 0.5) +
-    geom_point(data = df_line, aes(x = timestamp, y = value),
-               color = "#222222", size = 0.5) +
-    scale_fill_gradientn(
-      colors = palette, limits = c(0, 1),
-      breaks = br, labels = lbl, name = "Fuzzy score"
+  break_dates <- as.Date(
+    paste0(
+      break_years,
+      "-01-01"
+    )
+  )
+  
+  break_dates <- break_dates[
+    break_dates >= start_date &
+      break_dates <= end_date
+  ]
+  
+  if (length(break_dates) < 2L) {
+    break_dates <- unique(
+      as.Date(
+        c(
+          start_date,
+          end_date
+        )
+      )
+    )
+  }
+  
+  break_dates
+}
+
+compute_value_breaks <- function(
+    values,
+    target_breaks = 5L) {
+  
+  values <- as.numeric(
+    values
+  )
+  
+  values <- values[
+    is.finite(
+      values
+    )
+  ]
+  
+  if (length(values) == 0L) {
+    stop(
+      "No finite values were provided.",
+      call. = FALSE
+    )
+  }
+  
+  value_range <- range(
+    values
+  )
+  
+  if (
+    isTRUE(
+      all.equal(
+        value_range[1],
+        value_range[2]
+      )
+    )
+  ) {
+    margin <- max(
+      abs(
+        value_range[1]
+      ) *
+        0.05,
+      1e-6
+    )
+    
+    value_range <- c(
+      value_range[1] -
+        margin,
+      value_range[2] +
+        margin
+    )
+  }
+  
+  breaks <- pretty(
+    value_range,
+    n = as.integer(
+      target_breaks
+    )
+  )
+  
+  breaks <- breaks[
+    breaks >= value_range[1] &
+      breaks <= value_range[2]
+  ]
+  
+  if (length(breaks) < 2L) {
+    breaks <- pretty(
+      value_range,
+      n = max(
+        3L,
+        as.integer(
+          target_breaks
+        )
+      )
+    )
+  }
+  
+  breaks
+}
+
+# =========================================================
+# Series heatmap coloured by the final fuzzy score
+# =========================================================
+
+plot_series_fuzzy_heatmap <- function(
+    serie,
+    timestamps,
+    fuzzy_score,
+    threshold_value = NULL,
+    palette = c(
+      "white",
+      "yellow",
+      "red"
+    ),
+    n_interp = 3000L,
+    show_axis_titles = FALSE,
+    target_x_breaks = 6L,
+    target_y_breaks = 5L) {
+  
+  stopifnot(
+    length(serie) == length(fuzzy_score),
+    length(serie) == length(timestamps)
+  )
+  
+  df_line <- tibble::tibble(
+    timestamp = as.Date(
+      timestamps
+    ),
+    value = as.numeric(
+      serie
+    ),
+    score = as.numeric(
+      fuzzy_score
+    )
+  ) %>%
+    dplyr::filter(
+      !is.na(
+        timestamp
+      ),
+      !is.na(
+        value
+      ),
+      !is.na(
+        score
+      ),
+      is.finite(
+        value
+      ),
+      is.finite(
+        score
+      )
+    )
+  
+  if (nrow(df_line) == 0L) {
+    stop(
+      "Empty data frame after removing invalid values.",
+      call. = FALSE
+    )
+  }
+  
+  limiar <- threshold_value
+  
+  # Fine time grid for the smooth horizontal heatmap.
+  t_num <- as.numeric(
+    df_line$timestamp
+  )
+  
+  grid_t <- seq(
+    from = min(
+      t_num
+    ),
+    to = max(
+      t_num
+    ),
+    length.out = as.integer(
+      n_interp
+    )
+  )
+  
+  grid_s <- stats::approx(
+    x = t_num,
+    y = df_line$score,
+    xout = grid_t,
+    rule = 2
+  )$y
+  
+  tile_w <- (
+    max(
+      t_num
+    ) -
+      min(
+        t_num
+      )
+  ) /
+    as.integer(
+      n_interp
+    )
+  
+  df_heat <- tibble::tibble(
+    timestamp = as.Date(
+      grid_t,
+      origin = "1970-01-01"
+    ),
+    score = grid_s
+  )
+  
+  # Vertical geometry: fuzzy-score bands span the full plot height.
+  x_range <- as.Date(
+    range(
+      df_line$timestamp
+    )
+  )
+  
+  y_min <- min(
+    df_line$value
+  )
+  
+  y_max <- max(
+    df_line$value
+  )
+  
+  if (
+    isTRUE(
+      all.equal(
+        y_min,
+        y_max
+      )
+    )
+  ) {
+    y_margin <- max(
+      abs(
+        y_min
+      ) *
+        0.05,
+      1e-6
+    )
+    
+    y_min <- y_min -
+      y_margin
+    
+    y_max <- y_max +
+      y_margin
+  }
+  
+  y_center <- (
+    y_min +
+      y_max
+  ) /
+    2
+  
+  y_height <- (
+    y_max -
+      y_min
+  ) *
+    1.30
+  
+  # Axis breaks are calculated separately for each series.
+  x_breaks <- compute_year_breaks(
+    timestamps = df_line$timestamp,
+    target_breaks = target_x_breaks
+  )
+  
+  y_breaks <- compute_value_breaks(
+    values = df_line$value,
+    target_breaks = target_y_breaks
+  )
+  
+  # Legend with threshold mark.
+  if (!is.null(limiar)) {
+    br <- c(
+      0,
+      limiar,
+      1
+    )
+    
+    lbl <- c(
+      "0",
+      paste0(
+        "Threshold = ",
+        sprintf(
+          "%.3f",
+          limiar
+        )
+      ),
+      "1"
+    )
+  } else {
+    br <- c(
+      0,
+      0.5,
+      1
+    )
+    
+    lbl <- c(
+      "0",
+      "0.5",
+      "1"
+    )
+  }
+  
+  x_lab <- if (
+    show_axis_titles
+  ) {
+    "Year"
+  } else {
+    NULL
+  }
+  
+  y_lab <- if (
+    show_axis_titles
+  ) {
+    "Rate"
+  } else {
+    NULL
+  }
+  
+  ggplot2::ggplot() +
+    ggplot2::geom_tile(
+      data = df_heat,
+      ggplot2::aes(
+        x = timestamp,
+        y = y_center,
+        fill = score
+      ),
+      height = y_height,
+      width = tile_w
     ) +
-    scale_x_date(
+    ggplot2::geom_line(
+      data = df_line,
+      ggplot2::aes(
+        x = timestamp,
+        y = value
+      ),
+      color = "#222222",
+      linewidth = 0.5
+    ) +
+    ggplot2::geom_point(
+      data = df_line,
+      ggplot2::aes(
+        x = timestamp,
+        y = value
+      ),
+      color = "#222222",
+      size = 0.5
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colors = palette,
+      limits = c(
+        0,
+        1
+      ),
+      breaks = br,
+      labels = lbl,
+      name = "Fuzzy score"
+    ) +
+    ggplot2::scale_x_date(
       breaks = x_breaks,
       date_labels = "%Y",
-      limits = x_range,
-      expand = c(0.01, 0.01)
+      expand = c(
+        0.01,
+        0.01
+      )
     ) +
-    scale_y_continuous(
-      breaks = seq(floor(y_min), ceiling(y_max), by = 0.1),
-      expand = c(0, 0)
+    ggplot2::scale_y_continuous(
+      breaks = y_breaks,
+      expand = c(
+        0,
+        0
+      )
     ) +
-    coord_cartesian(ylim = c(y_min, y_max)) +
-    labs(x = x_lab, y = y_lab) +
-    guides(
-      fill = guide_colorbar(
-        direction    = "horizontal",
-        barwidth     = unit(5, "cm"),
-        barheight    = unit(0.25, "cm"),
-        ticks        = TRUE,
+    ggplot2::coord_cartesian(
+      xlim = x_range,
+      ylim = c(
+        y_min,
+        y_max
+      )
+    ) +
+    ggplot2::labs(
+      x = x_lab,
+      y = y_lab
+    ) +
+    ggplot2::guides(
+      fill = ggplot2::guide_colorbar(
+        direction = "horizontal",
+        barwidth = grid::unit(
+          5,
+          "cm"
+        ),
+        barheight = grid::unit(
+          0.25,
+          "cm"
+        ),
+        ticks = TRUE,
         ticks.colour = "black"
       )
     ) +
-    theme_bw(base_size = 12) +
-    theme(
-      axis.text.x      = element_text(angle = 0, hjust = 0.5),
-      legend.position  = "bottom",
-      panel.grid.major = element_line(color = "grey88", linewidth = 0.3),
-      panel.grid.minor = element_blank(),
-      panel.border     = element_rect(color = "grey60", fill = NA),
-      plot.margin      = margin(t = 10, r = 10, b = 10, l = 10)
+    ggplot2::theme_bw(
+      base_size = 12
+    ) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(
+        angle = 0,
+        hjust = 0.5
+      ),
+      axis.text.y = ggplot2::element_text(
+        hjust = 1
+      ),
+      legend.position = "bottom",
+      panel.grid.major = ggplot2::element_line(
+        color = "grey88",
+        linewidth = 0.3
+      ),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(
+        color = "grey60",
+        fill = NA
+      ),
+      plot.margin = ggplot2::margin(
+        t = 10,
+        r = 10,
+        b = 10,
+        l = 10
+      )
     )
 }
 
 # =========================================================
-# Data configuration
+# Real-data series configuration
 # =========================================================
 
-config <- list(
-  data = list(
-    tipo_dado   = "mortalidade",
+series_config <- list(
+  alcohol_mortality = list(
+    label = "Alcohol mortality",
+    tipo_dado = "mortalidade",
     tipo_evento = "alcool",
-    local       = "Brasil"
+    local = "Brasil",
+    sexo = NULL,
+    faixa_etaria = NULL,
+    figure_prefix = "alcohol_mortalidade"
+  ),
+  alcohol_hospitalization = list(
+    label = "Alcohol hospitalization",
+    tipo_dado = "internacao",
+    tipo_evento = "alcool",
+    local = "Brasil",
+    sexo = NULL,
+    faixa_etaria = NULL,
+    figure_prefix = "alcohol_internacao"
+  ),
+  mood_mortality = list(
+    label = "Mood disorder mortality",
+    tipo_dado = "mortalidade",
+    tipo_evento = "humor",
+    local = "Brasil",
+    sexo = NULL,
+    faixa_etaria = NULL,
+    figure_prefix = "mood_mortalidade"
+  ),
+  mood_hospitalization = list(
+    label = "Mood disorder hospitalization",
+    tipo_dado = "internacao",
+    tipo_evento = "humor",
+    local = "Brasil",
+    sexo = NULL,
+    faixa_etaria = NULL,
+    figure_prefix = "mood_internacao"
   )
 )
 
-data_file <- here::here(
-  "data", "real", "raw",
-  paste0("txs_", config$data$tipo_dado, "_", config$data$tipo_evento, ".csv")
+# =========================================================
+# OUTPUT DIRECTORIES
+# =========================================================
+
+real_results_directory <- here::here(
+  "results",
+  "real"
+)
+
+real_figures_directory <- here::here(
+  "figures",
+  "real"
+)
+
+dir.create(
+  real_results_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  real_figures_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+# =========================================================
+# Analyze one real-data series
+# =========================================================
+
+analyze_real_series <- function(series_id, series_cfg) {
+  
+  cat("\n\n")
+  cat("============================================================\n")
+  cat("SERIES:", series_cfg$label, "\n")
+  cat("============================================================\n")
+  
+  # Reset random generators for each series.
+  set_analysis_seed(
+    analysis_seed
+  )
+  
+  # =========================================================
+  # Data file
+  # =========================================================
+  
+  data_file <- here::here(
+    "data",
+    "real",
+    "raw",
+    paste0(
+      "txs_",
+      series_cfg$tipo_dado,
+      "_",
+      series_cfg$tipo_evento,
+      ".csv"
+    )
+  )
+  
+  if (!file.exists(data_file)) {
+    stop(
+      paste0(
+        "Input file not found: ",
+        data_file
+      ),
+      call. = FALSE
+    )
+  }
+  
+  cat(
+    "Input file:",
+    data_file,
+    "\n"
+  )
+  
+  # =========================================================
+  # Load data
+  # =========================================================
+  
+  df <- load_and_filter_data(
+    data_file = data_file,
+    local = series_cfg$local,
+    sexo = series_cfg$sexo,
+    faixa_etaria = series_cfg$faixa_etaria
+  ) %>%
+    dplyr::mutate(
+      t = dplyr::row_number(),
+      serie = value
+    )
+  
+  if (nrow(df) == 0L) {
+    stop(
+      paste0(
+        series_cfg$label,
+        ": no observations remained after filtering."
+      ),
+      call. = FALSE
+    )
+  }
+  
+  if (
+    anyNA(df$serie) ||
+    any(!is.finite(df$serie))
+  ) {
+    stop(
+      paste0(
+        series_cfg$label,
+        ": the series contains missing or non-finite values."
+      ),
+      call. = FALSE
+    )
+  }
+  
+  cat(
+    "Observations:",
+    nrow(df),
+    "\n"
+  )
+  
+  cat(
+    "Period:",
+    as.character(min(df$timestamp)),
+    "to",
+    as.character(max(df$timestamp)),
+    "\n"
+  )
+  
+  # =========================================================
+  # Preprocessing
+  # =========================================================
+  
+  preproc <- preprocess_series_for_methods(
+    df$serie
+  )
+  
+  serie_proc <- preproc$serie
+  
+  cat(
+    "Preprocessing | shift_applied:",
+    preproc$applied,
+    "| shift:",
+    round(preproc$shift, 6),
+    "\n"
+  )
+  
+  # =========================================================
+  # Level 1: frozen banks
+  # =========================================================
+  
+  cat(
+    "\n=== Building frozen banks (Level 1) ===\n"
+  )
+  
+  ae_member_bank <- build_ae_member_bank_frozen(
+    serie_proc
+  )
+  
+  cf_member_bank <- build_cf_member_bank_frozen(
+    serie_proc
+  )
+  
+  ae_ensemble <- build_ae_ensemble_from_frozen(
+    ae_member_bank
+  )
+  
+  cf_ensemble <- build_cf_ensemble_from_frozen(
+    cf_member_bank
+  )
+  
+  static_bank <- build_static_frozen_bank(
+    serie_proc
+  )
+  
+  # =========================================================
+  # Level 1: freeze AE and CF
+  # =========================================================
+  
+  cfg_detect <- list(
+    time_tolerance = REAL_TIME_TOLERANCE,
+    threshold = REAL_THRESHOLD,
+    threshold_type = REAL_THRESHOLD_TYPE,
+    use_nms = REAL_USE_NMS
+  )
+  
+  ae_det <- run_detect(
+    ae_ensemble,
+    serie_proc,
+    cfg_detect
+  )
+  
+  cf_det <- run_detect(
+    cf_ensemble,
+    serie_proc,
+    cfg_detect
+  )
+  
+  ae_frozen <- hcp_frozen_detection(
+    ae_det
+  )
+  
+  cf_frozen <- hcp_frozen_detection(
+    cf_det
+  )
+  
+  # =========================================================
+  # Level 2: MFEF+JP(F,12,0.95)
+  # =========================================================
+  
+  cat(
+    "\n=== Building Level 2: MFEF+JP(F,12,0.95) ===\n"
+  )
+  
+  ensemble_mfef_jp <- build_level2_mfef_jp(
+    ae_frozen,
+    cf_frozen,
+    static_bank
+  )
+  
+  ensemble_mfef_jp <- daltoolbox::fit(
+    ensemble_mfef_jp,
+    serie_proc
+  )
+  
+  detection_mfef_jp <- run_detect(
+    ensemble_mfef_jp,
+    serie_proc,
+    cfg_detect
+  )
+  
+  # =========================================================
+  # MFEF+JP detections
+  # =========================================================
+  
+  pred <- as.logical(
+    detection_mfef_jp$event
+  )
+  
+  pred[is.na(pred)] <- FALSE
+  
+  detected_positions <- which(
+    pred
+  )
+  
+  detected_timestamps <- df$timestamp[
+    pred
+  ]
+  
+  fuzzy_score <- attr(
+    detection_mfef_jp,
+    "score"
+  )
+  
+  threshold_value <- attr(
+    detection_mfef_jp,
+    "threshold"
+  )
+  
+  cat(
+    "\n=== MFEF+JP(F,12,0.95) DETECTIONS ===\n"
+  )
+  
+  cat(
+    "Number of change-points:",
+    sum(pred),
+    "\n"
+  )
+  
+  cat(
+    "Detected timestamps:\n"
+  )
+  
+  print(
+    detected_timestamps
+  )
+  
+  cat(
+    "\nThreshold value:",
+    round(threshold_value, 3),
+    "\n"
+  )
+  
+  # =========================================================
+  # Joinpoint detections
+  # =========================================================
+  
+  jp_dates <- extract_joinpoint_dates(
+    detection_mfef_jp,
+    df$timestamp
+  )
+  
+  jp_positions <- which(
+    df$timestamp %in% jp_dates
+  )
+  
+  cat(
+    "\n=== JOINPOINT(F) DETECTIONS ===\n"
+  )
+  
+  cat(
+    "Number of Joinpoint detections:",
+    length(jp_dates),
+    "\n"
+  )
+  
+  cat(
+    "Joinpoint timestamps:\n"
+  )
+  
+  print(
+    jp_dates
+  )
+  
+  # =========================================================
+  # Sub-threshold peaks
+  # =========================================================
+  
+  subthreshold_peaks <- find_subthreshold_peaks(
+    score = fuzzy_score,
+    timestamps = df$timestamp,
+    threshold_value = threshold_value,
+    min_peak_height = 0.2,
+    min_distance = REAL_TIME_TOLERANCE
+  )
+  
+  cat(
+    "\n=== SUB-THRESHOLD CONSENSUS PEAKS ===\n"
+  )
+  
+  print(
+    subthreshold_peaks
+  )
+  
+  # =========================================================
+  # Simple delta metrics
+  # =========================================================
+  
+  delta_metrics <- compute_delta_metrics(
+    serie = df$serie,
+    detected_positions = detected_positions,
+    timestamps = df$timestamp
+  )
+  
+  cat(
+    "\n=== SIMPLE DELTA-METRICS (MFEF+JP) ===\n"
+  )
+  
+  print(
+    delta_metrics
+  )
+  
+  # =========================================================
+  # Segment metrics: MFEF+JP
+  # =========================================================
+  
+  set.seed(
+    analysis_seed
+  )
+  
+  metrics_mfef <- compute_segment_metrics(
+    serie = df$serie,
+    change_positions = detected_positions,
+    timestamps = df$timestamp,
+    periods_per_year = 12,
+    B = bootstrap_replicates
+  )
+  
+  cat("\n=====================================\n")
+  cat("SEGMENT METRICS: MFEF+JP(F,12,0.95)\n")
+  cat("=====================================\n")
+  
+  cat(
+    "\n--- Segments (MFEF+JP) ---\n"
+  )
+  
+  print(
+    metrics_mfef$segments,
+    width = Inf
+  )
+  
+  cat(
+    "\n--- AAPC (MFEF+JP) ---\n"
+  )
+  
+  cat(
+    "AAPC:",
+    metrics_mfef$aapc,
+    "%\n"
+  )
+  
+  cat(
+    "\n--- Delta-metrics between segments (MFEF+JP) ---\n"
+  )
+  
+  print(
+    metrics_mfef$deltas,
+    width = Inf
+  )
+  
+  # =========================================================
+  # Segment metrics: Joinpoint
+  # =========================================================
+  
+  set.seed(
+    analysis_seed
+  )
+  
+  metrics_jp <- compute_segment_metrics(
+    serie = df$serie,
+    change_positions = jp_positions,
+    timestamps = df$timestamp,
+    periods_per_year = 12,
+    B = bootstrap_replicates
+  )
+  
+  cat("\n=====================================\n")
+  cat("SEGMENT METRICS: Joinpoint(F)\n")
+  cat("=====================================\n")
+  
+  cat(
+    "\n--- Segments (Joinpoint) ---\n"
+  )
+  
+  print(
+    metrics_jp$segments,
+    width = Inf
+  )
+  
+  cat(
+    "\n--- AAPC (Joinpoint) ---\n"
+  )
+  
+  cat(
+    "AAPC:",
+    metrics_jp$aapc,
+    "%\n"
+  )
+  
+  cat(
+    "\n--- Delta-metrics between segments (Joinpoint) ---\n"
+  )
+  
+  print(
+    metrics_jp$deltas,
+    width = Inf
+  )
+  
+  # =========================================================
+  # Plots and figure export
+  # =========================================================
+  
+  detectors_figure_file <- file.path(
+    real_figures_directory,
+    paste0(
+      series_cfg$figure_prefix,
+      "_detectors.pdf"
+    )
+  )
+  
+  score_figure_file <- file.path(
+    real_figures_directory,
+    paste0(
+      series_cfg$figure_prefix,
+      "_score.pdf"
+    )
+  )
+  
+  heatmap_figure_file <- file.path(
+    real_figures_directory,
+    paste0(
+      series_cfg$figure_prefix,
+      "_heatmap.pdf"
+    )
+  )
+  
+  figure_files <- c(
+    detectors = detectors_figure_file,
+    score = score_figure_file,
+    heatmap = heatmap_figure_file
+  )
+  
+  existing_figure_files <- figure_files[
+    file.exists(
+      figure_files
+    )
+  ]
+  
+  if (length(existing_figure_files) > 0L) {
+    unlink(
+      existing_figure_files
+    )
+  }
+  
+  # Detector-level figure
+  grDevices::pdf(
+    file = detectors_figure_file,
+    width = 12,
+    height = 9,
+    onefile = TRUE,
+    useDingbats = FALSE
+  )
+  
+  p_models <- harbinger::har_ensemble_plot_models(
+    detection = detection_mfef_jp,
+    serie = serie_proc,
+    time_idx = df$timestamp
+  )
+  
+  if (
+    inherits(
+      p_models,
+      "ggplot"
+    ) ||
+    inherits(
+      p_models,
+      "patchwork"
+    )
+  ) {
+    print(
+      p_models
+    )
+  }
+  
+  grDevices::dev.off()
+  
+  # Ensemble score and detected change-points
+  grDevices::pdf(
+    file = score_figure_file,
+    width = 12,
+    height = 7,
+    onefile = TRUE,
+    useDingbats = FALSE
+  )
+  
+  p_ensemble <- harbinger::har_ensemble_plot(
+    detection = detection_mfef_jp,
+    serie = serie_proc,
+    time_idx = df$timestamp
+  )
+  
+  if (
+    inherits(
+      p_ensemble,
+      "ggplot"
+    ) ||
+    inherits(
+      p_ensemble,
+      "patchwork"
+    )
+  ) {
+    print(
+      p_ensemble
+    )
+  }
+  
+  grDevices::dev.off()
+  
+  # Fuzzy-score heatmap
+  p_heat <- plot_series_fuzzy_heatmap(
+    serie = df$serie,
+    timestamps = df$timestamp,
+    fuzzy_score = fuzzy_score,
+    threshold_value = threshold_value,
+    show_axis_titles = FALSE,
+    target_x_breaks = 6L,
+    target_y_breaks = 5L
+  )
+  
+  ggplot2::ggsave(
+    filename = heatmap_figure_file,
+    plot = p_heat,
+    device = "pdf",
+    width = 12,
+    height = 5.5,
+    units = "in",
+    limitsize = FALSE
+  )
+  
+  # Display figures during interactive execution
+  if (
+    inherits(
+      p_models,
+      "ggplot"
+    ) ||
+    inherits(
+      p_models,
+      "patchwork"
+    )
+  ) {
+    print(
+      p_models
+    )
+  }
+  
+  if (
+    inherits(
+      p_ensemble,
+      "ggplot"
+    ) ||
+    inherits(
+      p_ensemble,
+      "patchwork"
+    )
+  ) {
+    print(
+      p_ensemble
+    )
+  }
+  
+  print(
+    p_heat
+  )
+  
+  
+  figure_status <- file.exists(
+    figure_files
+  )
+  
+  if (
+    any(
+      !figure_status
+    )
+  ) {
+    stop(
+      paste0(
+        series_cfg$label,
+        ": figure export failed for: ",
+        paste(
+          figure_files[
+            !figure_status
+          ],
+          collapse = ", "
+        )
+      ),
+      call. = FALSE
+    )
+  }
+  
+  figure_sizes <- file.info(
+    figure_files
+  )$size
+  
+  if (
+    any(
+      is.na(
+        figure_sizes
+      ) |
+      figure_sizes <= 0
+    )
+  ) {
+    stop(
+      paste0(
+        series_cfg$label,
+        ": one or more figure files are empty."
+      ),
+      call. = FALSE
+    )
+  }
+  
+  cat(
+    "\nFigures saved:\n"
+  )
+  
+  for (
+    figure_file in figure_files
+  ) {
+    cat(
+      figure_file,
+      "|",
+      file.info(
+        figure_file
+      )$size,
+      "bytes\n"
+    )
+  }
+  
+  # =========================================================
+  # Return series results
+  # =========================================================
+  
+  list(
+    series_id = series_id,
+    label = series_cfg$label,
+    data_file = data_file,
+    data_file_md5 = unname(
+      tools::md5sum(
+        data_file
+      )
+    ),
+    data = df,
+    preprocessing = preproc,
+    detections = list(
+      mfef_positions = detected_positions,
+      mfef_dates = detected_timestamps,
+      joinpoint_positions = jp_positions,
+      joinpoint_dates = jp_dates,
+      fuzzy_score = fuzzy_score,
+      threshold = threshold_value,
+      subthreshold_peaks = subthreshold_peaks
+    ),
+    metrics = list(
+      simple_deltas = delta_metrics,
+      mfef = metrics_mfef,
+      joinpoint = metrics_jp
+    ),
+    figures = list(
+      models = p_models,
+      ensemble = p_ensemble,
+      heatmap = p_heat,
+      files = as.list(
+        figure_files
+      )
+    )
+  )
+}
+
+# =========================================================
+# Run all four series
+# =========================================================
+
+real_analysis_results <- vector(
+  mode = "list",
+  length = length(series_config)
+)
+
+names(real_analysis_results) <- names(
+  series_config
+)
+
+for (series_id in names(series_config)) {
+  
+  real_analysis_results[[series_id]] <- analyze_real_series(
+    series_id = series_id,
+    series_cfg = series_config[[series_id]]
+  )
+  
+  gc()
+}
+
+# =========================================================
+# Derived real-data tables
+# =========================================================
+
+real_detections <- purrr::imap_dfr(
+  real_analysis_results,
+  function(
+    result,
+    series_id) {
+    
+    tibble::tibble(
+      series_id = series_id,
+      series = result$label,
+      threshold = result$detections$threshold,
+      mfef_detections = paste(
+        format(
+          result$detections$mfef_dates,
+          "%Y-%m"
+        ),
+        collapse = ", "
+      ),
+      joinpoint_detections = paste(
+        format(
+          result$detections$joinpoint_dates,
+          "%Y-%m"
+        ),
+        collapse = ", "
+      )
+    )
+  }
+)
+
+real_mfef_segments <- purrr::imap_dfr(
+  real_analysis_results,
+  function(
+    result,
+    series_id) {
+    
+    result$metrics$mfef$segments %>%
+      dplyr::mutate(
+        series_id = series_id,
+        series = result$label,
+        aapc = result$metrics$mfef$aapc,
+        .before = 1
+      )
+  }
+)
+
+real_mfef_deltas <- purrr::imap_dfr(
+  real_analysis_results,
+  function(
+    result,
+    series_id) {
+    
+    result$metrics$mfef$deltas %>%
+      dplyr::mutate(
+        series_id = series_id,
+        series = result$label,
+        .before = 1
+      )
+  }
+)
+
+real_input_manifest <- purrr::imap_dfr(
+  real_analysis_results,
+  function(
+    result,
+    series_id) {
+    
+    tibble::tibble(
+      series_id = series_id,
+      series = result$label,
+      data_file = result$data_file,
+      md5 = result$data_file_md5,
+      observations = nrow(
+        result$data
+      ),
+      start_date = min(
+        result$data$timestamp
+      ),
+      end_date = max(
+        result$data$timestamp
+      )
+    )
+  }
 )
 
 # =========================================================
-# Load data
+# Final summary
 # =========================================================
 
-df <- load_and_filter_data(
-  data_file,
-  local = config$data$local,
-  sexo = NULL,
-  faixa_etaria = NULL
+real_analysis_summary <- purrr::imap_dfr(
+  real_analysis_results,
+  function(result, series_id) {
+    tibble::tibble(
+      series_id = series_id,
+      series = result$label,
+      observations = nrow(result$data),
+      start_date = min(result$data$timestamp),
+      end_date = max(result$data$timestamp),
+      threshold = result$detections$threshold,
+      mfef_detections = paste(
+        result$detections$mfef_dates,
+        collapse = ", "
+      ),
+      joinpoint_detections = paste(
+        result$detections$joinpoint_dates,
+        collapse = ", "
+      ),
+      mfef_aapc = result$metrics$mfef$aapc,
+      joinpoint_aapc = result$metrics$joinpoint$aapc
+    )
+  }
+)
+
+cat("\n\n")
+cat("============================================================\n")
+cat("FINAL SUMMARY\n")
+cat("============================================================\n")
+
+print(
+  real_analysis_summary,
+  width = Inf
+)
+
+cat("\nAll four real-data series completed successfully.\n")
+
+# =========================================================
+# SAVE REAL-DATA RESULT ARTIFACTS
+# =========================================================
+
+real_analysis_results_file <- file.path(
+  real_results_directory,
+  "real_analysis_results.rds"
+)
+
+real_analysis_summary_file <- file.path(
+  real_results_directory,
+  "real_analysis_summary.rds"
+)
+
+real_detections_file <- file.path(
+  real_results_directory,
+  "real_detections.rds"
+)
+
+real_mfef_segments_file <- file.path(
+  real_results_directory,
+  "real_mfef_segments.rds"
+)
+
+real_mfef_deltas_file <- file.path(
+  real_results_directory,
+  "real_mfef_deltas.rds"
+)
+
+real_input_manifest_file <- file.path(
+  real_results_directory,
+  "real_input_manifest.rds"
+)
+
+saveRDS(
+  real_analysis_results,
+  real_analysis_results_file
+)
+
+saveRDS(
+  real_analysis_summary,
+  real_analysis_summary_file
+)
+
+saveRDS(
+  real_detections,
+  real_detections_file
+)
+
+saveRDS(
+  real_mfef_segments,
+  real_mfef_segments_file
+)
+
+saveRDS(
+  real_mfef_deltas,
+  real_mfef_deltas_file
+)
+
+saveRDS(
+  real_input_manifest,
+  real_input_manifest_file
+)
+
+cat("\n")
+cat("============================================================\n")
+cat("REAL-DATA ARTIFACTS\n")
+cat("============================================================\n")
+
+cat(
+  real_analysis_results_file,
+  "\n"
+)
+
+cat(
+  real_analysis_summary_file,
+  "\n"
+)
+
+cat(
+  real_detections_file,
+  "\n"
+)
+
+cat(
+  real_mfef_segments_file,
+  "\n"
+)
+
+cat(
+  real_mfef_deltas_file,
+  "\n"
+)
+
+cat(
+  real_input_manifest_file,
+  "\n"
+)
+
+# =========================================================
+# VERIFY REAL-DATA ARTIFACTS
+# =========================================================
+
+expected_result_files <- c(
+  real_analysis_results_file,
+  real_analysis_summary_file,
+  real_detections_file,
+  real_mfef_segments_file,
+  real_mfef_deltas_file,
+  real_input_manifest_file
+)
+
+expected_figure_files <- unlist(
+  purrr::map(
+    real_analysis_results,
+    function(result) {
+      unlist(
+        result$figures$files,
+        use.names = FALSE
+      )
+    }
+  ),
+  use.names = FALSE
+)
+
+missing_result_files <- expected_result_files[
+  !file.exists(
+    expected_result_files
+  )
+]
+
+missing_figure_files <- expected_figure_files[
+  !file.exists(
+    expected_figure_files
+  )
+]
+
+if (length(missing_result_files) > 0L) {
+  stop(
+    paste0(
+      "Missing result artifact(s): ",
+      paste(
+        missing_result_files,
+        collapse = ", "
+      )
+    ),
+    call. = FALSE
+  )
+}
+
+if (length(missing_figure_files) > 0L) {
+  stop(
+    paste0(
+      "Missing figure artifact(s): ",
+      paste(
+        missing_figure_files,
+        collapse = ", "
+      )
+    ),
+    call. = FALSE
+  )
+}
+
+real_artifact_files <- c(
+  expected_result_files,
+  expected_figure_files
+)
+
+real_artifact_metadata <- file.info(
+  real_artifact_files
+)
+
+empty_real_artifact_files <- real_artifact_files[
+  is.na(
+    real_artifact_metadata$size
+  ) |
+    real_artifact_metadata$size <= 0
+]
+
+if (length(empty_real_artifact_files) > 0L) {
+  stop(
+    paste0(
+      "Empty real-data artifact(s): ",
+      paste(
+        empty_real_artifact_files,
+        collapse = ", "
+      ),
+      "."
+    ),
+    call. = FALSE
+  )
+}
+
+real_artifact_inventory <- tibble::tibble(
+  file = basename(
+    real_artifact_files
+  ),
+  
+  path =
+    real_artifact_files,
+  
+  size_bytes =
+    real_artifact_metadata$size,
+  
+  modified =
+    real_artifact_metadata$mtime
 ) %>%
-  mutate(
-    t = seq_len(n()),
-    serie = value
+  arrange(
+    file
   )
 
-# =========================================================
-# Preprocessing
-# =========================================================
+cat("\n")
+cat("============================================================\n")
+cat("REAL-DATA ARTIFACT INVENTORY\n")
+cat("============================================================\n")
 
-preproc <- preprocess_series_for_methods(df$serie)
-serie_proc <- preproc$serie
-
-cat("Preprocessing | shift_applied:", preproc$applied,
-    "| shift:", round(preproc$shift, 6), "\n")
-
-# =========================================================
-# Level 1: frozen banks
-# =========================================================
-
-cat("\n=== Building frozen banks (Level 1) ===\n")
-
-ae_member_bank <- build_ae_member_bank_frozen(serie_proc)
-cf_member_bank <- build_cf_member_bank_frozen(serie_proc)
-
-ae_ensemble <- build_ae_ensemble_from_frozen(ae_member_bank)
-cf_ensemble <- build_cf_ensemble_from_frozen(cf_member_bank)
-
-static_bank <- build_static_frozen_bank(serie_proc)
-
-# =========================================================
-# Level 1: freeze AE and CF at the MFEF+JP(F,12,0.95) config
-# =========================================================
-
-cfg_detect <- list(
-  time_tolerance = REAL_TIME_TOLERANCE,
-  threshold      = REAL_THRESHOLD,
-  threshold_type = REAL_THRESHOLD_TYPE,
-  use_nms        = REAL_USE_NMS
+print(
+  real_artifact_inventory,
+  n = Inf,
+  width = Inf
 )
 
-ae_det <- run_detect(ae_ensemble, serie_proc, cfg_detect)
-cf_det <- run_detect(cf_ensemble, serie_proc, cfg_detect)
-
-ae_frozen <- hcp_frozen_detection(ae_det)
-cf_frozen <- hcp_frozen_detection(cf_det)
-
-# =========================================================
-# Level 2: MFEF+JP(F,12,0.95)
-# =========================================================
-
-cat("\n=== Building Level 2: MFEF+JP(F,12,0.95) ===\n")
-
-ensemble_mfef_jp <- build_level2_mfef_jp(ae_frozen, cf_frozen, static_bank)
-ensemble_mfef_jp <- daltoolbox::fit(ensemble_mfef_jp, serie_proc)
-
-detection_mfef_jp <- run_detect(ensemble_mfef_jp, serie_proc, cfg_detect)
-
-# =========================================================
-# Results: MFEF+JP
-# =========================================================
-
-pred <- as.logical(detection_mfef_jp$event)
-pred[is.na(pred)] <- FALSE
-detected_positions <- which(pred)
-detected_timestamps <- df$timestamp[pred]
-
-cat("\n=== MFEF+JP(F,12,0.95) DETECTIONS ===\n")
-cat("Number of change-points:", sum(pred), "\n")
-cat("Detected timestamps:\n")
-print(detected_timestamps)
-
-fuzzy_score <- attr(detection_mfef_jp, "score")
-threshold_value <- attr(detection_mfef_jp, "threshold")
-
-cat("\nThreshold value (0.95 percentile of scores > 0):", round(threshold_value, 3), "\n")
-
-# =========================================================
-# Joinpoint detections within the ensemble
-# =========================================================
-
-jp_dates <- extract_joinpoint_dates(detection_mfef_jp, df$timestamp)
-
-cat("\n=== JOINPOINT(F) DETECTIONS (within the ensemble) ===\n")
-cat("Number of Joinpoint detections:", length(jp_dates), "\n")
-cat("Joinpoint timestamps:\n")
-print(jp_dates)
-
-# =========================================================
-# Sub-threshold consensus peaks (qualitative)
-# =========================================================
-
-subthreshold_peaks <- find_subthreshold_peaks(
-  score = fuzzy_score,
-  timestamps = df$timestamp,
-  threshold_value = threshold_value,
-  min_peak_height = 0.2,
-  min_distance = REAL_TIME_TOLERANCE
+cat(
+  "\nNumber of real-data artifacts:",
+  nrow(
+    real_artifact_inventory
+  ),
+  "\n"
 )
 
-cat("\n=== SUB-THRESHOLD CONSENSUS PEAKS ===\n")
-cat("(candidate change regions with partial consensus; qualitative use)\n")
-print(subthreshold_peaks)
-
-# =========================================================
-# Simple delta-metrics (magnitude) for MFEF+JP detections
-# =========================================================
-
-delta_metrics <- compute_delta_metrics(
-  serie = df$serie,
-  detected_positions = detected_positions,
-  timestamps = df$timestamp
+cat(
+  "All real-data artifacts were saved successfully.\n"
 )
 
-cat("\n=== SIMPLE DELTA-METRICS (MFEF+JP) ===\n")
-print(delta_metrics)
 
-# =========================================================
-# Full segment metrics: MFEF+JP
-# =========================================================
 
-cat("\n=====================================\n")
-cat("SEGMENT METRICS: MFEF+JP(F,12,0.95)\n")
-cat("=====================================\n")
 
-metrics_mfef <- compute_segment_metrics(
-  serie = df$serie,
-  change_positions = detected_positions,
-  timestamps = df$timestamp,
-  periods_per_year = 12
-)
-
-cat("\n--- Segments (MFEF+JP) ---\n")
-print(metrics_mfef$segments, width = Inf)
-
-cat("\n--- AAPC (MFEF+JP) ---\n")
-cat("AAPC:", metrics_mfef$aapc, "%\n")
-
-cat("\n--- Delta-metrics between segments (MFEF+JP) ---\n")
-print(metrics_mfef$deltas, width = Inf)
-
-# =========================================================
-# Full segment metrics: Joinpoint(F)
-# =========================================================
-
-cat("\n=====================================\n")
-cat("SEGMENT METRICS: Joinpoint(F)\n")
-cat("=====================================\n")
-
-jp_positions <- which(df$timestamp %in% jp_dates)
-
-metrics_jp <- compute_segment_metrics(
-  serie = df$serie,
-  change_positions = jp_positions,
-  timestamps = df$timestamp,
-  periods_per_year = 12
-)
-
-cat("\n--- Segments (Joinpoint) ---\n")
-print(metrics_jp$segments, width = Inf)
-
-cat("\n--- AAPC (Joinpoint) ---\n")
-cat("AAPC:", metrics_jp$aapc, "%\n")
-
-cat("\n--- Delta-metrics between segments (Joinpoint) ---\n")
-print(metrics_jp$deltas, width = Inf)
-
-# =========================================================
-# Standard plots
-# =========================================================
-
-harbinger::har_ensemble_plot_models(
-  detection = detection_mfef_jp,
-  serie = serie_proc,
-  time_idx = df$timestamp
-)
-
-harbinger::har_ensemble_plot(
-  detection = detection_mfef_jp,
-  serie = serie_proc,
-  time_idx = df$timestamp
-)
-
-# Automatic: chooses 5 or 10 depending on the series length
-p_heat <- plot_series_fuzzy_heatmap(
-  serie           = df$serie,
-  timestamps      = df$timestamp,
-  fuzzy_score     = fuzzy_score,
-  threshold_value = threshold_value,
-  x_break_years = 10,
-  y_n_breaks = 4
-)
-print(p_heat)
