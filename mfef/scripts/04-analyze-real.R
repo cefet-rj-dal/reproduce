@@ -711,6 +711,8 @@ compute_segment_metrics <- function(serie, change_positions, timestamps,
       mean_lower = round(mean_lower, 3),
       mean_upper = round(mean_upper, 3),
       mean_ci = sprintf("%.3f [%.3f, %.3f]", seg_mean, mean_lower, mean_upper),
+      # Keep full precision for AAPC; round only the presentation column.
+      apc_raw = unname(apc_res["apc"]),
       apc = round(apc_res["apc"], 2),
       apc_lower = round(apc_res["lower"], 2),
       apc_upper = round(apc_res["upper"], 2),
@@ -724,10 +726,20 @@ compute_segment_metrics <- function(serie, change_positions, timestamps,
     )
   }
   segments_tbl <- bind_rows(segment_results)
-  valid_apc <- !is.na(segments_tbl$apc)
+  valid_apc <- !is.na(segments_tbl$apc_raw) &
+    segments_tbl$apc_raw > -100 &
+    !is.na(segments_tbl$duration_months)
   if (any(valid_apc)) {
-    aapc <- sum(segments_tbl$apc[valid_apc] * segments_tbl$duration_months[valid_apc]) /
-      sum(segments_tbl$duration_months[valid_apc])
+    # Clegg et al.'s geometric AAPC: the duration-weighted mean is
+    # calculated on the log rate-ratio scale, not directly on APC (%).
+    apc_weights <- segments_tbl$duration_months[valid_apc]
+    aapc <- 100 * (
+      exp(
+        sum(
+          apc_weights * log1p(segments_tbl$apc_raw[valid_apc] / 100)
+        ) / sum(apc_weights)
+      ) - 1
+    )
   } else {
     aapc <- NA_real_
   }

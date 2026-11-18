@@ -1,8 +1,8 @@
-# MFEF: confidence-weighted detection of structural changes in epidemiological time series
+# MFEF: consensus-weighted detection of structural changes in epidemiological time series
 
 Code, data, and result artifacts for the synthetic benchmark and real-data application of the **Multilevel Fuzzy Ensemble Framework (MFEF)**.
 
-MFEF integrates heterogeneous change-point detectors into confidence-weighted evidence of structural change. The framework combines classical statistical, Bayesian online, machine-learning, and deep-learning methods and is evaluated against optimized Joinpoint regression configurations. The MFEF consensus mechanism is implemented in the **Harbinger** R package.
+MFEF integrates heterogeneous change-point detectors into consensus-weighted evidence of structural change. The framework combines classical statistical, Bayesian online, machine-learning, and deep-learning methods and is evaluated alongside Joinpoint regression configurations. The MFEF consensus mechanism is implemented in the **Harbinger** R package.
 
 ## Repository structure
 
@@ -12,7 +12,9 @@ mfef/
 │   ├── 01-prep-synthetic.R
 │   ├── 02-run-mfef-synthetic.R
 │   ├── 03-analyze-synthetic.R
-│   └── 04-analyze-real.R
+│   ├── 04-analyze-real.R
+│   ├── 05-analyze-flat-ablation.R
+│   └── 06-analyze-scenario-sensitivity.R
 │
 ├── data/
 │   ├── synthetic/
@@ -56,6 +58,8 @@ The scripts have the following responsibilities:
 - `02-run-mfef-synthetic.R` executes the MFEF and Joinpoint configurations and saves the synthetic detection results.
 - `03-analyze-synthetic.R` reads the complete detection results, performs the synthetic statistical analysis, and saves the corresponding tables and figures.
 - `04-analyze-real.R` executes the four real-data applications and saves the complete results, derived tables, and figures.
+- `05-analyze-flat-ablation.R` performs matched hierarchical-versus-flat comparisons, including scenario-clustered sensitivity analyses.
+- `06-analyze-scenario-sensitivity.R` reweights the validated benchmark by factorial scenario and reports scenario-level ranks and central contrasts.
 
 ## Requirements
 
@@ -126,6 +130,20 @@ results/synthetic/
 figures/synthetic/
 ```
 
+The scenario-balanced sensitivity analysis and the unconditional central
+operating profiles reported in the manuscript are reproduced with:
+
+```r
+source("scripts/06-analyze-scenario-sensitivity.R")
+```
+
+This script writes the scenario ranks, central contrasts, complete operating-
+profile summary, and the soft precision--recall--null-burden figure to:
+
+```text
+outputs/synthetic/analysis/
+```
+
 ### Real-data application
 
 Run:
@@ -180,6 +198,18 @@ source("scripts/02-run-mfef-synthetic.R")
 ```
 
 Synthetic detection is computationally intensive. The batch parameters in `02-run-mfef-synthetic.R` determine the subset of series processed in each execution.
+
+The flat FCO ablation is deliberately written to separate files so that it does not overwrite the validated 20-configuration batches. In PowerShell, run:
+
+```powershell
+$env:MFEF_FLAT_ABLATION_ONLY = "true"
+Rscript scripts/02-run-mfef-synthetic.R
+Rscript scripts/05-analyze-flat-ablation.R
+```
+
+For a bounded pilot, also set `MFEF_BATCH_START` and `MFEF_BATCH_END` to the desired series IDs. The base-detector outputs are reused in memory across the six flat FCO configurations and persisted as per-series RDS files under `outputs/synthetic/detector_cache/`. The cache is enabled by default and is validated against the series, detector parameters, package version, and analysis seed before reuse. Set `MFEF_USE_DETECTOR_CACHE=false` to ignore existing cache files or `MFEF_SAVE_DETECTOR_CACHE=false` to disable new cache writes. Cache contents are generated artifacts and are not committed.
+
+The first flat-ablation run must execute the base detectors because the validated production batches predate this cache. Later interrupted or additional ensemble runs can reuse the saved detector banks without repeating that stage.
 
 After generating the two required batches, run:
 

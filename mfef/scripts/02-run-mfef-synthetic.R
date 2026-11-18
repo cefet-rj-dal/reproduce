@@ -322,6 +322,20 @@ batch_ranges <- tibble::tribble(
   851L,                  1679L
 )
 
+# Optional bounded run for pilots and resumable jobs. If one value is set,
+# both must be set; the default two production batches remain unchanged.
+batch_start_override <- Sys.getenv("MFEF_BATCH_START", unset = "")
+batch_end_override <- Sys.getenv("MFEF_BATCH_END", unset = "")
+if (nzchar(batch_start_override) || nzchar(batch_end_override)) {
+  if (!nzchar(batch_start_override) || !nzchar(batch_end_override)) {
+    stop("Set both MFEF_BATCH_START and MFEF_BATCH_END.", call. = FALSE)
+  }
+  batch_ranges <- tibble::tibble(
+    batch_start_serie_id = as.integer(batch_start_override),
+    batch_end_serie_id = as.integer(batch_end_override)
+  )
+}
+
 # Visual diagnostics target
 plot_target_serie_id <- 838
 
@@ -336,6 +350,26 @@ run_joinpoint_baseline <- TRUE
 run_mfef_base <- TRUE
 run_mfef_jp_false <- TRUE
 run_mfef_jp_true <- TRUE
+# Flat fuzzy ensemble ablation: the same 12 base detectors used by MFEF,
+# combined in one level instead of the AE/CF hierarchical grouping. Keep it
+# separate from the 20-configuration production analysis.
+run_fco_flat <- FALSE
+flat_ablation_only <- tolower(
+  Sys.getenv("MFEF_FLAT_ABLATION_ONLY", unset = "false")
+) %in% c("1", "true", "yes")
+use_detector_cache <- tolower(
+  Sys.getenv("MFEF_USE_DETECTOR_CACHE", unset = "true")
+) %in% c("1", "true", "yes")
+save_detector_cache <- tolower(
+  Sys.getenv("MFEF_SAVE_DETECTOR_CACHE", unset = "true")
+) %in% c("1", "true", "yes")
+if (flat_ablation_only) {
+  run_joinpoint_baseline <- FALSE
+  run_mfef_base <- FALSE
+  run_mfef_jp_false <- FALSE
+  run_mfef_jp_true <- FALSE
+  run_fco_flat <- TRUE
+}
 
 # MFEF grid
 detection_time_tolerance_grid <- c(3, 6, 12)
@@ -395,9 +429,19 @@ synthetic_detection_directory <- here::here(
   "synthetic",
   "detections"
 )
+synthetic_detector_cache_directory <- here::here(
+  "outputs",
+  "synthetic",
+  "detector_cache"
+)
 
 dir.create(
   synthetic_detection_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+dir.create(
+  synthetic_detector_cache_directory,
   recursive = TRUE,
   showWarnings = FALSE
 )
@@ -405,11 +449,16 @@ dir.create(
 build_batch_file <- function(
     batch_start_serie_id,
     batch_end_serie_id) {
+  file_prefix <- if (flat_ablation_only) {
+    "batch_fco_flat_ablation_"
+  } else {
+    "batch_mfef_joinpoint_hybrid_soft_hard_"
+  }
   
   file.path(
     synthetic_detection_directory,
     paste0(
-      "batch_mfef_joinpoint_hybrid_soft_hard_",
+      file_prefix,
       "id_",
       batch_start_serie_id,
       "_",
@@ -489,12 +538,14 @@ extract_series_metadata <- function(selected_row) {
 get_active_ensemble_families <- function(
     run_mfef_base,
     run_mfef_jp_false,
-    run_mfef_jp_true
+    run_mfef_jp_true,
+    run_fco_flat
 ) {
   out <- c()
   if (run_mfef_base) out <- c(out, "MFEF")
   if (run_mfef_jp_false) out <- c(out, "MFEF_JP_FALSE")
   if (run_mfef_jp_true) out <- c(out, "MFEF_JP_TRUE")
+  if (run_fco_flat) out <- c(out, "FCO_FLAT")
   out
 }
 
@@ -588,6 +639,67 @@ freeze_once <- function(model, serie, cfg = list()) {
   model     <- fit(model, serie)
   detection <- run_detection(model, serie, cfg)
   hcp_frozen_detection(detection)
+}
+
+frozen_bank_to_cache <- function(bank) {
+  lapply(bank, function(model) {
+    if (is.null(model)) return(NULL)
+    list(
+      events = as.logical(model$events),
+      score = as.numeric(model$score)
+    )
+  })
+}
+
+frozen_bank_from_cache <- function(bank) {
+  lapply(bank, function(model) {
+    if (is.null(model)) return(NULL)
+    hcp_frozen_detection(
+      data.frame(event = as.logical(model$events)),
+      score = as.numeric(model$score)
+    )
+  })
+}
+
+build_detector_cache_signature <- function(
+    serie_id,
+    serie,
+    shift_value,
+    binseg_Q,
+    bocpd_hazard,
+    bocpd_dist,
+    bocpd_threshold,
+    bocpd_min_distance,
+    bocpd_burn_in,
+    joinpoint_min_between,
+    joinpoint_min_end,
+    joinpoint_k_max
+) {
+  list(
+    cache_version = 1L,
+    serie_id = as.integer(serie_id),
+    series_length = length(serie),
+    series_values = as.numeric(serie),
+    shift_value = as.numeric(shift_value),
+    analysis_seed = analysis_seed,
+    harbinger_version = as.character(utils::packageVersion("harbinger")),
+    binseg_Q = binseg_Q,
+    bocpd_hazard = bocpd_hazard,
+    bocpd_dist = bocpd_dist,
+    bocpd_threshold = bocpd_threshold,
+    bocpd_min_distance = bocpd_min_distance,
+    bocpd_burn_in = bocpd_burn_in,
+    joinpoint_min_between = joinpoint_min_between,
+    joinpoint_min_end = joinpoint_min_end,
+    joinpoint_k_max = joinpoint_k_max
+  )
+}
+
+detector_cache_file <- function(serie_id) {
+  file.path(
+    synthetic_detector_cache_directory,
+    sprintf("detector_bank_serie_%04d.rds", as.integer(serie_id))
+  )
 }
 
 # =========================================================
@@ -795,6 +907,29 @@ build_level2_ensemble <- function(
     models$JOINPOINT <- static_bank$JOINPOINT_TRUE
   }
   
+  do.call(har_ensemble_fuzzy, models)
+}
+
+build_flat_ensemble <- function(
+    ae_member_bank,
+    cf_member_bank,
+    static_bank
+) {
+  models <- list(
+    BINSEG = static_bank$BINSEG,
+    PELT = static_bank$PELT,
+    GFT = static_bank$GFT,
+    SCP = static_bank$SCP,
+    BOCPD = static_bank$BOCPD,
+    WAYPOINT_ED = ae_member_bank$WAYPOINT_ED,
+    WAYPOINT_LSTM = ae_member_bank$WAYPOINT_LSTM,
+    WAYPOINT_CONV = ae_member_bank$WAYPOINT_CONV,
+    CF_ARIMA = cf_member_bank$CF_ARIMA,
+    CF_LR = cf_member_bank$CF_LR,
+    CF_GARCH = cf_member_bank$CF_GARCH,
+    CF_ETS = cf_member_bank$CF_ETS
+  )
+
   do.call(har_ensemble_fuzzy, models)
 }
 
@@ -1022,6 +1157,8 @@ run_ensemble_family_one <- function(
     detection_use_nms,
     ae_ensemble_frozen_config,
     cf_ensemble_frozen_config,
+    ae_member_bank,
+    cf_member_bank,
     static_bank,
     joinpoint_available
 ) {
@@ -1082,12 +1219,20 @@ run_ensemble_family_one <- function(
       use_nms = detection_use_nms
     )
     
-    level2_ensemble <- build_level2_ensemble(
-      family_name = family_name,
-      ae_ensemble_frozen_config = ae_ensemble_frozen_config,
-      cf_ensemble_frozen_config = cf_ensemble_frozen_config,
-      static_bank = static_bank
-    )
+    level2_ensemble <- if (family_name == "FCO_FLAT") {
+      build_flat_ensemble(
+        ae_member_bank = ae_member_bank,
+        cf_member_bank = cf_member_bank,
+        static_bank = static_bank
+      )
+    } else {
+      build_level2_ensemble(
+        family_name = family_name,
+        ae_ensemble_frozen_config = ae_ensemble_frozen_config,
+        cf_ensemble_frozen_config = cf_ensemble_frozen_config,
+        static_bank = static_bank
+      )
+    }
     
     level2_ensemble  <- fit(level2_ensemble, dataset$serie)
     level2_detection <- run_detection(level2_ensemble, dataset$serie, detection_config)
@@ -1164,6 +1309,7 @@ run_one_series_comparison <- function(
     run_mfef_base,
     run_mfef_jp_false,
     run_mfef_jp_true,
+    run_fco_flat,
     bocpd_hazard,
     bocpd_dist,
     bocpd_threshold,
@@ -1202,15 +1348,12 @@ run_one_series_comparison <- function(
   
   joinpoint_available <- exists("hcp_joinpoint", mode = "function")
   
-  # Frozen banks (per series)
-  ae_member_bank <- build_ae_member_bank_frozen(dataset$serie)
-  cf_member_bank <- build_cf_member_bank_frozen(dataset$serie)
-  
-  ae_ensemble_from_frozen <- build_ae_ensemble_from_frozen(ae_member_bank)
-  cf_ensemble_from_frozen <- build_cf_ensemble_from_frozen(cf_member_bank)
-  
-  static_bank <- build_static_frozen_bank(
+  # Frozen banks (per series). Persist the individual detector outputs so that
+  # subsequent ensemble variants do not require the expensive detector stage.
+  current_cache_signature <- build_detector_cache_signature(
+    serie_id = metadata$serie_id[[1]],
     serie = dataset$serie,
+    shift_value = preproc$shift,
     binseg_Q = binseg_Q,
     bocpd_hazard = bocpd_hazard,
     bocpd_dist = bocpd_dist,
@@ -1221,6 +1364,60 @@ run_one_series_comparison <- function(
     joinpoint_min_end = joinpoint_min_end,
     joinpoint_k_max = joinpoint_k_max
   )
+  current_cache_file <- detector_cache_file(metadata$serie_id[[1]])
+  cached_banks <- NULL
+  if (use_detector_cache && file.exists(current_cache_file)) {
+    cache_candidate <- tryCatch(
+      readRDS(current_cache_file),
+      error = function(e) NULL
+    )
+    if (
+      !is.null(cache_candidate) &&
+        identical(cache_candidate$signature, current_cache_signature)
+    ) {
+      cached_banks <- cache_candidate
+      cat("Loaded detector cache:", current_cache_file, "\n")
+    } else {
+      cat("Ignoring incompatible detector cache:", current_cache_file, "\n")
+    }
+  }
+
+  if (!is.null(cached_banks)) {
+    ae_member_bank <- frozen_bank_from_cache(cached_banks$ae_member_bank)
+    cf_member_bank <- frozen_bank_from_cache(cached_banks$cf_member_bank)
+    static_bank <- frozen_bank_from_cache(cached_banks$static_bank)
+  } else {
+    ae_member_bank <- build_ae_member_bank_frozen(dataset$serie)
+    cf_member_bank <- build_cf_member_bank_frozen(dataset$serie)
+    static_bank <- build_static_frozen_bank(
+      serie = dataset$serie,
+      binseg_Q = binseg_Q,
+      bocpd_hazard = bocpd_hazard,
+      bocpd_dist = bocpd_dist,
+      bocpd_threshold = bocpd_threshold,
+      bocpd_min_distance = bocpd_min_distance,
+      bocpd_burn_in = bocpd_burn_in,
+      joinpoint_min_between = joinpoint_min_between,
+      joinpoint_min_end = joinpoint_min_end,
+      joinpoint_k_max = joinpoint_k_max
+    )
+    if (save_detector_cache) {
+      saveRDS(
+        list(
+          signature = current_cache_signature,
+          ae_member_bank = frozen_bank_to_cache(ae_member_bank),
+          cf_member_bank = frozen_bank_to_cache(cf_member_bank),
+          static_bank = frozen_bank_to_cache(static_bank)
+        ),
+        current_cache_file,
+        compress = "gzip"
+      )
+      cat("Saved detector cache:", current_cache_file, "\n")
+    }
+  }
+
+  ae_ensemble_from_frozen <- build_ae_ensemble_from_frozen(ae_member_bank)
+  cf_ensemble_from_frozen <- build_cf_ensemble_from_frozen(cf_member_bank)
   
   # Joinpoint baselines
   if (run_joinpoint_baseline) {
@@ -1253,7 +1450,8 @@ run_one_series_comparison <- function(
   ensemble_families <- get_active_ensemble_families(
     run_mfef_base = run_mfef_base,
     run_mfef_jp_false = run_mfef_jp_false,
-    run_mfef_jp_true = run_mfef_jp_true
+    run_mfef_jp_true = run_mfef_jp_true,
+    run_fco_flat = run_fco_flat
   )
   
   # Cache frozen AE/CF per config (computed once per config)
@@ -1301,6 +1499,8 @@ run_one_series_comparison <- function(
           detection_use_nms = detection_use_nms,
           ae_ensemble_frozen_config = ae_frozen_config,
           cf_ensemble_frozen_config = cf_frozen_config,
+          ae_member_bank = ae_member_bank,
+          cf_member_bank = cf_member_bank,
           static_bank = static_bank,
           joinpoint_available = joinpoint_available
         )
@@ -1328,6 +1528,7 @@ run_one_series_for_plots <- function(
     run_mfef_base,
     run_mfef_jp_false,
     run_mfef_jp_true,
+    run_fco_flat,
     bocpd_hazard,
     bocpd_dist,
     bocpd_threshold,
@@ -1403,7 +1604,8 @@ run_one_series_for_plots <- function(
   families <- get_active_ensemble_families(
     run_mfef_base = run_mfef_base,
     run_mfef_jp_false = run_mfef_jp_false,
-    run_mfef_jp_true = run_mfef_jp_true
+    run_mfef_jp_true = run_mfef_jp_true,
+    run_fco_flat = run_fco_flat
   )
   
   # Cache frozen AE/CF per config (computed once per config)
@@ -1458,6 +1660,8 @@ run_one_series_for_plots <- function(
           detection_use_nms = detection_use_nms,
           ae_ensemble_frozen_config = ae_frozen_config,
           cf_ensemble_frozen_config = cf_frozen_config,
+          ae_member_bank = ae_member_bank,
+          cf_member_bank = cf_member_bank,
           static_bank = static_bank,
           joinpoint_available = joinpoint_available
         )
@@ -1923,6 +2127,8 @@ if (run_batch) {
               run_mfef_jp_false,
             run_mfef_jp_true =
               run_mfef_jp_true,
+            run_fco_flat =
+              run_fco_flat,
             bocpd_hazard =
               bocpd_hazard,
             bocpd_dist =
@@ -2053,7 +2259,9 @@ if (run_batch) {
         run_mfef_jp_false =
           run_mfef_jp_false,
         run_mfef_jp_true =
-          run_mfef_jp_true
+          run_mfef_jp_true,
+        run_fco_flat =
+          run_fco_flat
       )
     )
     
@@ -2266,7 +2474,8 @@ if (plot_diagnostics) {
     get_active_ensemble_families(
       run_mfef_base = run_mfef_base,
       run_mfef_jp_false = run_mfef_jp_false,
-      run_mfef_jp_true = run_mfef_jp_true
+      run_mfef_jp_true = run_mfef_jp_true,
+      run_fco_flat = run_fco_flat
     ),
     collapse = "; "
   ), "\n")
@@ -2287,6 +2496,7 @@ if (plot_diagnostics) {
     run_mfef_base = run_mfef_base,
     run_mfef_jp_false = run_mfef_jp_false,
     run_mfef_jp_true = run_mfef_jp_true,
+    run_fco_flat = run_fco_flat,
     bocpd_hazard = bocpd_hazard,
     bocpd_dist = bocpd_dist,
     bocpd_threshold = bocpd_threshold,
