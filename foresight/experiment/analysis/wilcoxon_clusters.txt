@@ -1,0 +1,14 @@
+cluster: cluster_0
+strategy;paired_test;n;W;p_value;effect_size
+ro;foresight vs arima;168;4098,0;1,01e-06;0,423
+ro;foresight vs mlp;168;5083,0;0,0007082;0,284
+sa;foresight vs arima;168;4071,0;8,171e-07;0,426
+sa;foresight vs mlp;168;4616,0;4,231e-05;0,350
+
+cluster: cluster_1
+strategy;paired_test;n;W;p_value;effect_size
+ro;foresight vs arima;92;1443,0;0,003363;0,325
+ro;foresight vs mlp;92;1676,0;0,0357;0,216
+sa;foresight vs arima;92;1445,0;0,003442;0,324
+sa;foresight vs mlp;92;2433,0;0,8739;-0,137
+

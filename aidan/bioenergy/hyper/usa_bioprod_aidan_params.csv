@@ -1,0 +1,2 @@
+"input_size","preprocess","augment","size","decay","maxit","key","window_size"
+10,"ts_norm_swminmax","ts_aug_jitter",3,0.1,1000,3,10

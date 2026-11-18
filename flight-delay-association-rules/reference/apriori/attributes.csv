@@ -1,0 +1,28 @@
+attribute,dimension
+carrier,Features
+airport_dep,Spatial
+time_dep,Temporal
+day_of_the_week_dep,Temporal
+month_dep,Temporal
+year_dep,Temporal
+working_day_dep,Temporal
+temperature_dep,Weather
+humidity_dep,Weather
+pressure_dep,Weather
+wind_speed_dep,Weather
+wind_direction_dep,Weather
+cloud_cover_dep,Weather
+delay_level_dep,State of the system
+airport_arr,Spatial
+time_arr,Temporal
+day_of_the_week_arr,Temporal
+month_arr,Temporal
+year_arr,Temporal
+working_day_arr,Temporal
+temperature_arr,Weather
+humidity_arr,Weather
+pressure_arr,Weather
+wind_speed_arr,Weather
+wind_direction_arr,Weather
+cloud_cover_arr,Weather
+delay_level_arr,State of the system

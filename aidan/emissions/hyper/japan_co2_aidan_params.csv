@@ -1,0 +1,2 @@
+"input_size","preprocess","augment","nhid","actfun","key","window_size"
+8,"ts_norm_an","ts_aug_jitter",6,"radbas",16,8
