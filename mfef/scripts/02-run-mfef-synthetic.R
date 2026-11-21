@@ -2044,17 +2044,10 @@ if (run_batch) {
     
     cat(
       "Series selected:",
-      nrow(
-        batch_tbl
-      ),
+      nrow(batch_tbl),
       "\n"
     )
-    cat(
-      "Configurations per series:",
-      n_configurations_per_series,
-      "\n"
-    )
-    
+     
     batch_results <- vector(
       mode = "list",
       length = nrow(
@@ -2277,6 +2270,12 @@ if (run_batch) {
     n_configurations_per_series <-
       n_joinpoint_configurations +
       n_ensemble_configurations
+    
+    cat(
+      "Configurations per series:",
+      n_configurations_per_series,
+      "\n"
+    )
     
     expected_configuration_rows <-
       nrow(

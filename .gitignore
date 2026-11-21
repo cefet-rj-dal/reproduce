@@ -103,3 +103,4 @@ rsconnect/
 *.log
 *~foresight/paper/
 foresight/paper/
+.Rproj.user

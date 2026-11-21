@@ -119,6 +119,15 @@ for (current_k in sort(unique(paired$time_tolerance))) {
     ]
     changed <- current[!current$is_null,]
     null <- current[current$is_null,]
+    
+    cat(
+      "\nk =", current_k,
+      "| rho =", current_rho,
+      "| paired =", nrow(current),
+      "| changed =", nrow(changed),
+      "| null =", nrow(null),
+      "\n"
+    )
 
     for (metric in c("hard_F1", "soft_F1")) {
       results[[result_index]] <- paired_summary(

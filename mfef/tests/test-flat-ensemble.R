@@ -60,7 +60,7 @@ stopifnot(
 
 flat_model <- build_flat_ensemble(ae_bank, cf_bank, static_bank)
 flat_model <- fit(flat_model, series)
-flat_detection <- detect(
+flat_detection <- harbinger::detect(
   flat_model,
   series,
   time_tolerance = 3,
