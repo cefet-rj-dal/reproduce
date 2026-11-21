@@ -207,9 +207,7 @@ Rscript scripts/02-run-mfef-synthetic.R
 Rscript scripts/05-analyze-flat-ablation.R
 ```
 
-For a bounded pilot, also set `MFEF_BATCH_START` and `MFEF_BATCH_END` to the desired series IDs. The base-detector outputs are reused in memory across the six flat FCO configurations and persisted as per-series RDS files under `outputs/synthetic/detector_cache/`. The cache is enabled by default and is validated against the series, detector parameters, package version, and analysis seed before reuse. Set `MFEF_USE_DETECTOR_CACHE=false` to ignore existing cache files or `MFEF_SAVE_DETECTOR_CACHE=false` to disable new cache writes. Cache contents are generated artifacts and are not committed.
-
-The first flat-ablation run must execute the base detectors because the validated production batches predate this cache. Later interrupted or additional ensemble runs can reuse the saved detector banks without repeating that stage.
+For a bounded pilot, also set `MFEF_BATCH_START` and `MFEF_BATCH_END` to the desired series IDs. During ablation runs, base-detector outputs are reused in memory across the six flat FCO configurations and may be persisted as per-series RDS files under `outputs/synthetic/detector_cache/` to support interrupted or additional runs. The cache is enabled by default and is validated against the series, detector parameters, package version, and analysis seed before reuse. Set `MFEF_USE_DETECTOR_CACHE=false` to ignore existing cache files or `MFEF_SAVE_DETECTOR_CACHE=false` to disable new cache writes. Cache contents are generated artifacts and are not committed.
 
 After generating the two required batches, run:
 
